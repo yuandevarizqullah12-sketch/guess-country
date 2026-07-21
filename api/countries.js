@@ -18,7 +18,7 @@ export default async function handler(req, res) {
     }
 
     try {
-        const url = 'https://api.restcountries.com/countries/v5/all';
+        const url = 'https://api.restcountries.com/v5/all';
 
         const response = await fetch(url, {
             headers: {
