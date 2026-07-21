@@ -4,7 +4,7 @@
 // Mengatur navigasi, auth, solo, multiplayer, leaderboard, settings.
 // =====================================================================
 
-import * as api from "./api/api.js";
+import * as api from "./services/api.js";
 
 // =====================================================================
 // GLOBAL STATE

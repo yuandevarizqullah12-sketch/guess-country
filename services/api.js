@@ -198,13 +198,13 @@ export async function fetchTopLeaderboard(topN = 100) {
 }
 
 // =====================================================================
-// COUNTRY HELPER — reads api/data.json (local database, no external API)
+// COUNTRY HELPER — reads services/data.json (local database, no external API)
 // =====================================================================
 let countryCache = null;
 
 export async function loadCountries() {
   if (countryCache) return countryCache;
-  const res = await fetch("./api/data.json");
+  const res = await fetch("./services/data.json");
   if (!res.ok) throw new Error("Gagal memuat data negara");
   countryCache = await res.json();
   return countryCache;
