@@ -1,5 +1,5 @@
 // api/countries.js
-// Serverless Function untuk Vercel - Proxy ke City-State-Country API (gratis, tanpa API Key)
+// Serverless Function untuk Vercel - Proxy ke City-State-Country API + FlagCDN
 
 export default async function handler(req, res) {
     // Hanya izinkan method GET
@@ -29,40 +29,47 @@ export default async function handler(req, res) {
 
         const data = await response.json();
 
-        // Mapping ke format yang kompatibel dengan frontend (seperti REST Countries)
-        const mappedData = data.map((item) => ({
-            name: {
-                common: item.name,
-                official: item.native || item.name, // fallback
-            },
-            // Frontend menggunakan properti `flag` untuk menampilkan bendera
-            flag: item.emoji || '🏳️',
-            flags: {
-                svg: item.emoji || '',
-                png: item.emoji || '',
-                alt: `Flag of ${item.name}`,
-            },
-            capital: item.capital || 'N/A',
-            region: item.region || 'Unknown',
-            subregion: item.subregion || 'Unknown',
-            population: 0, // API tidak menyediakan populasi
-            area: 0,
-            languages: [], // API tidak menyediakan languages
-            currencies: item.currency ? [item.currency_name || item.currency] : [],
-            continents: [], // API tidak menyediakan continents
-            maps: '',
-            timezones: item.timezones || [],
-            independent: true,
-            unMember: false,
-            // Informasi tambahan (opsional)
-            cca2: item.iso2,
-            cca3: item.iso3,
-            phone_code: item.phone_code,
-            native: item.native,
-            translations: item.translations || {},
-            latitude: item.latitude,
-            longitude: item.longitude,
-        }));
+        // Mapping data dengan FlagCDN untuk bendera
+        const mappedData = data.map((item) => {
+            // Ambil kode ISO2 (contoh: "id", "us")
+            const iso2 = item.iso2?.toLowerCase() || '';
+            // Buat URL bendera dari FlagCDN
+            const flagUrl = iso2 ? `https://flagcdn.com/${iso2}.svg` : '';
+            const flagEmoji = item.emoji || '🏳️';
+
+            return {
+                name: {
+                    common: item.name,
+                    official: item.native || item.name,
+                },
+                // 🟢 Properti flag: URL gambar jika ada, fallback emoji
+                flag: flagUrl || flagEmoji,
+                flags: {
+                    svg: flagUrl,
+                    png: iso2 ? `https://flagcdn.com/${iso2}.png` : '',
+                    alt: `Flag of ${item.name}`,
+                },
+                capital: item.capital || 'N/A',
+                region: item.region || 'Unknown',
+                subregion: item.subregion || 'Unknown',
+                population: 0,
+                area: 0,
+                languages: [],
+                currencies: item.currency ? [item.currency_name || item.currency] : [],
+                continents: [],
+                maps: '',
+                timezones: item.timezones || [],
+                independent: true,
+                unMember: false,
+                cca2: item.iso2,
+                cca3: item.iso3,
+                phone_code: item.phone_code,
+                native: item.native,
+                translations: item.translations || {},
+                latitude: item.latitude,
+                longitude: item.longitude,
+            };
+        });
 
         console.log(`✅ Successfully fetched and mapped ${mappedData.length} countries`);
 
@@ -70,6 +77,7 @@ export default async function handler(req, res) {
         res.setHeader('Cache-Control', 'public, s-maxage=3600, stale-while-revalidate=86400');
 
         return res.status(200).json(mappedData);
+
     } catch (error) {
         console.error('❌ Internal error:', error);
         return res.status(500).json({
