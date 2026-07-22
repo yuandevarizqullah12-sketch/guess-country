@@ -57,7 +57,7 @@ const firebaseConfig = {
   projectId: "temporaryfileupload-92123",
   storageBucket: "temporaryfileupload-92123.firebasestorage.app",
   messagingSenderId: "1068057413521",
-  appId: "1:1068057413521:web:142ca446afb7cd4dddfc30",
+  appId: "1:1068057413521:web:142ca446afb7cd4dddfc30"
 };
 
 const firebaseApp = initializeApp(firebaseConfig);
