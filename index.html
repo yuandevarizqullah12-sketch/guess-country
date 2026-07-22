@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
 <title>Guess Country</title>
-<meta name="description" content="Tebak negara dari petunjuk — mode solo maupun multiplayer real-time." />
+<meta name="description" content="Tebak negara dari petunjuk — mode solo maupun multiplayer private room." />
 <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🌍</text></svg>" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -53,21 +53,21 @@
 <main id="app-pages" class="app-pages">
 
   <!-- ---------- LOGIN ---------- -->
-  <section id="page-login" class="page page-login active" data-page="login">
+  <div id="page-login" class="page page-login active" data-page="login">
     <div class="login-card glass">
       <div class="login-globe">🌍</div>
       <h1 class="login-title">Guess Country</h1>
-      <p class="login-subtitle">Tebak negara dari petunjuk. Adu cepat lawan pemain lain di seluruh dunia.</p>
+      <p class="login-subtitle">Tebak negara dari petunjuk. Main sendiri atau ajak teman lewat private room.</p>
       <button id="btn-google-login" class="btn btn-primary btn-google">
         <span class="google-icon">G</span>
         Masuk dengan Google
       </button>
       <p class="login-footnote">Dengan masuk, statistik dan skor kamu akan tersimpan otomatis.</p>
     </div>
-  </section>
+  </div>
 
   <!-- ---------- HOME ---------- -->
-  <section id="page-home" class="page page-home" data-page="home">
+  <div id="page-home" class="page page-home" data-page="home">
     <header class="page-header">
       <h2 class="page-title">Halo, <span id="home-username">Pemain</span> 👋</h2>
       <p class="page-subtitle">Siap menjelajahi dunia hari ini?</p>
@@ -97,7 +97,7 @@
       <button class="home-action-card glass" data-page="multiplayer">
         <span class="home-action-icon">⚔️</span>
         <span class="home-action-title">Multiplayer</span>
-        <span class="home-action-desc">Random match lawan pemain lain</span>
+        <span class="home-action-desc">Buat / gabung private room</span>
       </button>
       <button class="home-action-card glass" data-page="leaderboard">
         <span class="home-action-icon">🏆</span>
@@ -110,16 +110,15 @@
         <span class="home-action-desc">Kelola profil & lihat statistik</span>
       </button>
     </div>
-  </section>
+  </div>
 
   <!-- ---------- SOLO ---------- -->
-  <section id="page-solo" class="page page-solo" data-page="solo">
+  <div id="page-solo" class="page page-solo" data-page="solo">
     <header class="page-header">
       <h2 class="page-title">Solo Mode</h2>
       <p class="page-subtitle">Pilih kesulitan lalu mulai menebak.</p>
     </header>
 
-    <!-- difficulty picker -->
     <div id="solo-setup" class="solo-setup">
       <div id="solo-difficulty-select" class="difficulty-grid">
         <button class="difficulty-card glass" data-difficulty="easy">
@@ -142,7 +141,6 @@
       <button id="btn-solo-start" class="btn btn-primary btn-block" disabled>Mulai Permainan</button>
     </div>
 
-    <!-- active game -->
     <div id="solo-game-area" class="solo-game-area hidden">
       <div class="solo-hud">
         <div class="hud-chip glass"><span class="hud-label">Skor</span><span id="solo-score" class="hud-value">0</span></div>
@@ -151,8 +149,8 @@
         <div class="hud-chip glass timer-chip"><span class="hud-label">Waktu</span><span id="solo-timer" class="hud-value">00</span></div>
       </div>
 
-      <div class="solo-timer-bar-track">
-        <div id="solo-timer-bar" class="solo-timer-bar-fill"></div>
+      <div class="timer-bar-track">
+        <div id="solo-timer-bar" class="timer-bar-fill"></div>
       </div>
 
       <div class="clue-card glass">
@@ -168,7 +166,6 @@
       <button id="solo-skip-btn" class="btn btn-ghost btn-block">Lewati</button>
     </div>
 
-    <!-- result -->
     <div id="solo-result" class="solo-result hidden">
       <div class="result-card glass">
         <span class="result-emoji">🏁</span>
@@ -185,98 +182,189 @@
         </div>
       </div>
     </div>
-  </section>
+  </div>
 
-  <!-- ---------- MULTIPLAYER ---------- -->
-  <section id="page-multiplayer" class="page page-multiplayer" data-page="multiplayer">
+  <!-- ---------- MULTIPLAYER (PRIVATE ROOM) ---------- -->
+  <div id="page-multiplayer" class="page page-multiplayer" data-page="multiplayer">
     <header class="page-header">
       <h2 class="page-title">Multiplayer</h2>
-      <p class="page-subtitle">Random match global melawan pemain lain.</p>
+      <p class="page-subtitle">Main bareng teman lewat private room.</p>
     </header>
 
-    <div id="multiplayer-intro" class="multiplayer-intro">
-      <div class="mp-intro-card glass">
-        <span class="mp-intro-emoji">⚔️</span>
-        <p class="mp-intro-text">Kamu akan dipasangkan dengan pemain lain secara acak. Negara, petunjuk, dan waktu sama untuk kedua pemain — siapa cepat dan tepat, dapat skor lebih besar.</p>
-        <button id="btn-find-match" class="btn btn-primary btn-block">Cari Lawan (Random Match)</button>
-      </div>
-    </div>
+    <div id="mp-views" class="mp-views">
 
-    <div id="multiplayer-searching" class="multiplayer-searching hidden">
-      <div class="searching-card glass">
-        <div class="searching-spinner"></div>
-        <p class="searching-text">Searching opponent…</p>
-        <p class="searching-timer">00:<span id="search-timer">00</span></p>
-        <p class="searching-count"><span id="queue-count">0</span> pemain mengantre</p>
-        <button id="btn-cancel-search" class="btn btn-ghost btn-block">Batalkan</button>
-      </div>
-    </div>
-
-    <div id="multiplayer-game" class="multiplayer-game hidden">
-      <div class="mp-scoreboard">
-        <div class="mp-player-badge glass">
-          <img id="mp-player1-avatar" class="mp-player-avatar" src="" alt="" />
-          <span id="mp-player1-name" class="mp-player-name">Player 1</span>
-          <span id="mp-player1-score" class="mp-player-score">0</span>
-        </div>
-        <span class="mp-vs">VS</span>
-        <div class="mp-player-badge glass">
-          <img id="mp-player2-avatar" class="mp-player-avatar" src="" alt="" />
-          <span id="mp-player2-name" class="mp-player-name">Player 2</span>
-          <span id="mp-player2-score" class="mp-player-score">0</span>
+      <!-- INTRO: pilih Create / Join -->
+      <div id="mp-view-intro" class="mp-view active">
+        <div class="mp-choice-grid">
+          <button id="btn-mp-create-room" class="mp-choice-card glass">
+            <span class="mp-choice-emoji">🟢</span>
+            <span class="mp-choice-title">Create Room</span>
+            <span class="mp-choice-desc">Buat room baru & undang teman lewat kode</span>
+          </button>
+          <button id="btn-mp-join-room-open" class="mp-choice-card glass">
+            <span class="mp-choice-emoji">🔵</span>
+            <span class="mp-choice-title">Join Room</span>
+            <span class="mp-choice-desc">Masukkan kode room dari temanmu</span>
+          </button>
         </div>
       </div>
 
-      <div class="solo-hud">
-        <div class="hud-chip glass"><span class="hud-label">Ronde</span><span id="mp-round" class="hud-value">1/8</span></div>
-        <div class="hud-chip glass timer-chip"><span class="hud-label">Waktu</span><span id="mp-timer" class="hud-value">00</span></div>
-      </div>
-      <div class="solo-timer-bar-track">
-        <div id="mp-timer-bar" class="solo-timer-bar-fill"></div>
-      </div>
+      <!-- CREATE ROOM FORM -->
+      <div id="mp-view-create-form" class="mp-view">
+        <div class="mp-form-card glass">
+          <h3 class="mp-form-title">Buat Room</h3>
 
-      <div class="clue-card glass">
-        <span class="clue-eyebrow">Petunjuk</span>
-        <p id="mp-clue-text" class="clue-text">Memuat petunjuk…</p>
-      </div>
+          <label class="mp-form-label" for="mp-room-name-input">Nama Room</label>
+          <input id="mp-room-name-input" class="mp-form-input" type="text" maxlength="24" placeholder="Room Seru-seruan" />
 
-      <form id="mp-answer-form" class="answer-form" autocomplete="off">
-        <input id="mp-answer-input" class="answer-input" type="text" placeholder="Ketik nama negara…" autocomplete="off" />
-        <div id="mp-suggestions" class="suggestions-list hidden"></div>
-        <button id="mp-submit-btn" type="submit" class="btn btn-primary">Jawab</button>
-      </form>
-      <p id="mp-round-status" class="mp-round-status"></p>
-    </div>
+          <span class="mp-form-label">Jumlah Round</span>
+          <div id="mp-rounds-options" class="mp-option-row" data-value="10">
+            <button class="mp-option-btn" data-value="5">5</button>
+            <button class="mp-option-btn selected" data-value="10">10</button>
+            <button class="mp-option-btn" data-value="15">15</button>
+            <button class="mp-option-btn" data-value="20">20</button>
+          </div>
 
-    <div id="multiplayer-result" class="multiplayer-result hidden">
-      <div class="result-card glass">
-        <span class="result-emoji" id="mp-result-emoji">🏆</span>
-        <h3 class="result-title" id="mp-result-title">Kamu Menang!</h3>
-        <div class="result-grid">
-          <div class="result-item"><span class="result-value" id="mp-result-myscore">0</span><span class="result-label">Skormu</span></div>
-          <div class="result-item"><span class="result-value" id="mp-result-oppscore">0</span><span class="result-label">Skor Lawan</span></div>
+          <span class="mp-form-label">Durasi / Ronde</span>
+          <div id="mp-duration-options" class="mp-option-row" data-value="30">
+            <button class="mp-option-btn" data-value="10">10s</button>
+            <button class="mp-option-btn" data-value="20">20s</button>
+            <button class="mp-option-btn selected" data-value="30">30s</button>
+            <button class="mp-option-btn" data-value="45">45s</button>
+            <button class="mp-option-btn" data-value="60">60s</button>
+          </div>
+
+          <span class="mp-form-label">Difficulty</span>
+          <div id="mp-difficulty-options" class="mp-option-row" data-value="medium">
+            <button class="mp-option-btn" data-value="easy">Easy</button>
+            <button class="mp-option-btn selected" data-value="medium">Medium</button>
+            <button class="mp-option-btn" data-value="hard">Hard</button>
+            <button class="mp-option-btn" data-value="extreme">Extreme</button>
+          </div>
+
+          <div class="mp-form-actions">
+            <button id="btn-mp-create-submit" class="btn btn-primary btn-block">Create Room</button>
+            <button id="btn-mp-create-cancel" class="btn btn-ghost btn-block">Batal</button>
+          </div>
         </div>
-        <div class="result-actions">
-          <button id="btn-mp-rematch" class="btn btn-primary btn-block">Cari Lawan Lagi</button>
-          <button id="btn-mp-exit" class="btn btn-ghost btn-block">Kembali ke Home</button>
+      </div>
+
+      <!-- JOIN ROOM FORM -->
+      <div id="mp-view-join-form" class="mp-view">
+        <div class="mp-form-card glass">
+          <h3 class="mp-form-title">Join Room</h3>
+          <label class="mp-form-label" for="mp-join-code-input">Kode Room</label>
+          <input id="mp-join-code-input" class="mp-form-input mp-code-input" type="text" maxlength="6" placeholder="ABCD12" autocomplete="off" />
+          <p id="mp-join-error" class="mp-join-error hidden"></p>
+          <div class="mp-form-actions">
+            <button id="btn-mp-join-submit" class="btn btn-primary btn-block">Join Room</button>
+            <button id="btn-mp-join-cancel" class="btn btn-ghost btn-block">Batal</button>
+          </div>
         </div>
       </div>
+
+      <!-- ROOM CODE DISPLAY (after create, waiting for guest) -->
+      <div id="mp-view-waiting" class="mp-view">
+        <div class="mp-form-card glass mp-waiting-card">
+          <p class="mp-waiting-label">Bagikan kode ini ke temanmu</p>
+          <div class="mp-room-code" id="mp-room-code-display">------</div>
+          <button id="btn-mp-copy-code" class="btn btn-ghost">📋 Copy Room Code</button>
+          <div class="mp-waiting-spinner"></div>
+          <p class="mp-waiting-text">Menunggu pemain kedua bergabung…</p>
+          <button id="btn-mp-cancel-room" class="btn btn-danger btn-block">Batalkan Room</button>
+        </div>
+      </div>
+
+      <!-- LOBBY (host + guest present) -->
+      <div id="mp-view-lobby" class="mp-view">
+        <div class="mp-lobby-card glass">
+          <p class="mp-lobby-room-name" id="mp-lobby-room-name">Room</p>
+          <div class="mp-lobby-players">
+            <div class="mp-lobby-player">
+              <img id="mp-lobby-host-avatar" class="mp-lobby-avatar" src="" alt="" />
+              <span id="mp-lobby-host-name" class="mp-lobby-name">Host</span>
+              <span class="mp-lobby-badge mp-lobby-badge-host">Host</span>
+            </div>
+            <div class="mp-lobby-player">
+              <img id="mp-lobby-guest-avatar" class="mp-lobby-avatar" src="" alt="" />
+              <span id="mp-lobby-guest-name" class="mp-lobby-name">Menunggu…</span>
+              <span class="mp-lobby-badge mp-lobby-badge-guest" id="mp-lobby-guest-badge">Guest</span>
+            </div>
+          </div>
+          <div class="mp-lobby-settings" id="mp-lobby-settings-summary"></div>
+          <button id="btn-mp-start-game" class="btn btn-primary btn-block hidden">Start Game</button>
+          <p id="mp-lobby-waiting-text" class="mp-lobby-waiting-text hidden">Menunggu host memulai permainan…</p>
+          <button id="btn-mp-leave-lobby" class="btn btn-ghost btn-block">Leave Room</button>
+        </div>
+      </div>
+
+      <!-- GAME -->
+      <div id="mp-view-game" class="mp-view">
+        <div class="mp-scoreboard">
+          <div class="mp-player-badge glass">
+            <img id="mp-host-avatar" class="mp-player-avatar" src="" alt="" />
+            <span id="mp-host-name" class="mp-player-name">Host</span>
+            <span id="mp-host-score" class="mp-player-score">0</span>
+          </div>
+          <span class="mp-vs">VS</span>
+          <div class="mp-player-badge glass">
+            <img id="mp-guest-avatar" class="mp-player-avatar" src="" alt="" />
+            <span id="mp-guest-name" class="mp-player-name">Guest</span>
+            <span id="mp-guest-score" class="mp-player-score">0</span>
+          </div>
+        </div>
+
+        <div class="solo-hud mp-hud">
+          <div class="hud-chip glass"><span class="hud-label">Ronde</span><span id="mp-round" class="hud-value">1/10</span></div>
+          <div class="hud-chip glass timer-chip"><span class="hud-label">Waktu</span><span id="mp-timer" class="hud-value">00</span></div>
+        </div>
+        <div class="timer-bar-track">
+          <div id="mp-timer-bar" class="timer-bar-fill"></div>
+        </div>
+
+        <div class="clue-card glass">
+          <span class="clue-eyebrow">Petunjuk</span>
+          <p id="mp-clue-text" class="clue-text">Memuat petunjuk…</p>
+        </div>
+
+        <form id="mp-answer-form" class="answer-form" autocomplete="off">
+          <input id="mp-answer-input" class="answer-input" type="text" placeholder="Ketik nama negara…" autocomplete="off" />
+          <div id="mp-suggestions" class="suggestions-list hidden"></div>
+          <button id="mp-submit-btn" type="submit" class="btn btn-primary">Jawab</button>
+        </form>
+        <p id="mp-round-status" class="mp-round-status"></p>
+      </div>
+
+      <!-- RESULT -->
+      <div id="mp-view-result" class="mp-view">
+        <div class="result-card glass">
+          <span class="result-emoji" id="mp-result-emoji">🏆</span>
+          <h3 class="result-title" id="mp-result-title">Host Menang!</h3>
+          <div class="result-grid">
+            <div class="result-item"><span class="result-value" id="mp-result-host-score">0</span><span class="result-label">Skor Host</span></div>
+            <div class="result-item"><span class="result-value" id="mp-result-guest-score">0</span><span class="result-label">Skor Guest</span></div>
+          </div>
+          <div class="result-actions">
+            <button id="btn-mp-rematch" class="btn btn-primary btn-block hidden">Rematch</button>
+            <button id="btn-mp-leave-result" class="btn btn-ghost btn-block">Leave Room</button>
+          </div>
+        </div>
+      </div>
+
     </div>
-  </section>
+  </div>
 
   <!-- ---------- LEADERBOARD ---------- -->
-  <section id="page-leaderboard" class="page page-leaderboard" data-page="leaderboard">
+  <div id="page-leaderboard" class="page page-leaderboard" data-page="leaderboard">
     <header class="page-header">
       <h2 class="page-title">Leaderboard</h2>
       <p class="page-subtitle">Top 100 skor tertinggi — Solo Mode saja.</p>
     </header>
-    <div id="leaderboard-list" class="leaderboard-list">
-      <p class="leaderboard-empty">Memuat leaderboard…</p>
-    </div>
-  </section>
+    <div id="leaderboard-list" class="leaderboard-list"></div>
+  </div>
 
   <!-- ---------- SETTINGS ---------- -->
-  <section id="page-settings" class="page page-settings" data-page="settings">
+  <div id="page-settings" class="page page-settings" data-page="settings">
     <header class="page-header">
       <h2 class="page-title">Settings</h2>
       <p class="page-subtitle">Profil dan statistik kamu.</p>
@@ -298,11 +386,10 @@
       <div class="stat-card glass"><span class="stat-value" id="stat-highest-score">0</span><span class="stat-label">Highest Score</span></div>
       <div class="stat-card glass"><span class="stat-value" id="stat-best-accuracy">0%</span><span class="stat-label">Best Accuracy</span></div>
       <div class="stat-card glass"><span class="stat-value" id="stat-rating">0</span><span class="stat-label">Rating</span></div>
-      <div class="stat-card glass"><span class="stat-value" id="stat-total-points">0</span><span class="stat-label">Total Points</span></div>
     </div>
 
     <button id="btn-logout" class="btn btn-danger btn-block">Keluar</button>
-  </section>
+  </div>
 
 </main>
 

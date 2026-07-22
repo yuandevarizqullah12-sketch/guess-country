@@ -1,5 +1,5 @@
 // =====================================================================
-// api/api.js
+// services/api.js
 // Seluruh fungsi API murni: Firebase, Firestore, Auth, data negara.
 // TIDAK ada manipulasi DOM / UI di file ini.
 // =====================================================================
@@ -21,7 +21,6 @@ import {
   deleteDoc,
   collection,
   query,
-  where,
   orderBy,
   limit,
   onSnapshot,
@@ -30,6 +29,22 @@ import {
   runTransaction,
   increment,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+// ---------------------------------------------------------------------
+// DEBUG LOGGER
+// Set DEBUG = false untuk mematikan seluruh log di console.
+// ---------------------------------------------------------------------
+export const DEBUG = true;
+
+export function log(scope, ...args) {
+  if (!DEBUG) return;
+  console.log(`[${scope}]`, ...args);
+}
+
+export function logError(scope, ...args) {
+  // Error selalu dicetak walau DEBUG mati, supaya bug production tetap terlihat.
+  console.error(`[${scope}]`, ...args);
+}
 
 // ---------------------------------------------------------------------
 // FIREBASE INITIALIZATION
@@ -42,7 +57,7 @@ const firebaseConfig = {
   projectId: "temporaryfileupload-92123",
   storageBucket: "temporaryfileupload-92123.firebasestorage.app",
   messagingSenderId: "1068057413521",
-  appId: "1:1068057413521:web:142ca446afb7cd4dddfc30"
+  appId: "1:1068057413521:web:142ca446afb7cd4dddfc30",
 };
 
 const firebaseApp = initializeApp(firebaseConfig);
@@ -50,20 +65,28 @@ const auth = getAuth(firebaseApp);
 const db = getFirestore(firebaseApp);
 const googleProvider = new GoogleAuthProvider();
 
+log("bootstrap", "Firebase initialized", { projectId: firebaseConfig.projectId });
+
 // =====================================================================
 // AUTH HELPER
 // =====================================================================
 export async function signInWithGoogle() {
+  log("auth", "signInWithGoogle: opening popup");
   const result = await signInWithPopup(auth, googleProvider);
+  log("auth", "signInWithGoogle: success", result.user.uid);
   return result.user;
 }
 
 export async function signOutUser() {
+  log("auth", "signOutUser");
   await signOut(auth);
 }
 
 export function onAuthChange(callback) {
-  return onAuthStateChanged(auth, callback);
+  return onAuthStateChanged(auth, (user) => {
+    log("auth", "onAuthChange", user ? user.uid : null);
+    callback(user);
+  });
 }
 
 export function getCurrentUser() {
@@ -77,6 +100,7 @@ export async function ensureProfile(user) {
   const ref = doc(db, "profiles", user.uid);
   const snap = await getDoc(ref);
   if (snap.exists()) {
+    log("firestore", "ensureProfile: existing profile", user.uid);
     return snap.data();
   }
   const newProfile = {
@@ -92,9 +116,9 @@ export async function ensureProfile(user) {
     highestScore: 0,
     bestAccuracy: 0,
     rating: 1000,
-    totalPoints: 0,
   };
   await setDoc(ref, newProfile);
+  log("firestore", "ensureProfile: created new profile", user.uid);
   return newProfile;
 }
 
@@ -104,9 +128,16 @@ export async function getProfile(uid) {
 }
 
 export function listenProfile(uid, callback) {
-  return onSnapshot(doc(db, "profiles", uid), (snap) => {
-    if (snap.exists()) callback(snap.data());
-  });
+  return onSnapshot(
+    doc(db, "profiles", uid),
+    (snap) => {
+      if (snap.exists()) {
+        log("firestore", "listenProfile: snapshot", uid);
+        callback(snap.data());
+      }
+    },
+    (err) => logError("firestore", "listenProfile error", err)
+  );
 }
 
 export async function updateProfileName(uid, newName) {
@@ -114,9 +145,10 @@ export async function updateProfileName(uid, newName) {
     displayName: newName,
     updatedAt: serverTimestamp(),
   });
+  log("firestore", "updateProfileName", uid, newName);
 }
 
-// Update profile statistics after a Solo or Multiplayer game finishes.
+// Update statistik profil sesudah game Solo atau Multiplayer selesai.
 export async function applyGameResultToProfile(uid, { score, accuracy, won, isMultiplayer }) {
   const ref = doc(db, "profiles", uid);
   const snap = await getDoc(ref);
@@ -125,7 +157,6 @@ export async function applyGameResultToProfile(uid, { score, accuracy, won, isMu
   const patch = {
     updatedAt: serverTimestamp(),
     gamesPlayed: increment(1),
-    totalPoints: increment(score),
   };
 
   if (isMultiplayer) {
@@ -140,34 +171,35 @@ export async function applyGameResultToProfile(uid, { score, accuracy, won, isMu
     patch.bestAccuracy = accuracy;
   }
 
-  // Simple rating adjustment: solo contributes small gains, multiplayer wins/losses shift more.
   let ratingDelta = 0;
   if (isMultiplayer) {
-    ratingDelta = won ? 18 : -12;
+    ratingDelta = won ? 18 : won === false ? -12 : 0;
   } else {
     ratingDelta = Math.round(accuracy / 10);
   }
   patch.rating = increment(ratingDelta);
 
   await updateDoc(ref, patch);
+  log("firestore", "applyGameResultToProfile", uid, patch);
 }
 
 // =====================================================================
 // LEADERBOARD HELPER — collection "leaderboard", doc id = uid (SOLO ONLY)
+// Satu user hanya satu entry. Skor baru hanya menimpa jika lebih tinggi.
 // =====================================================================
-export async function upsertLeaderboardEntry({ uid, displayName, photoURL, score, accuracy, gamesPlayed }) {
+export async function upsertLeaderboardEntry({ uid, displayName, photoURL, score, accuracy }) {
   const ref = doc(db, "leaderboard", uid);
   const snap = await getDoc(ref);
   const current = snap.exists() ? snap.data() : null;
 
   if (current && current.highestScore >= score) {
-    // Keep existing higher score, but refresh secondary fields.
     await updateDoc(ref, {
       displayName,
       photoURL,
       gamesPlayed: (current.gamesPlayed || 0) + 1,
       updatedAt: serverTimestamp(),
     });
+    log("leaderboard", "upsertLeaderboardEntry: score not higher, refreshed metadata only", uid);
     return;
   }
 
@@ -184,9 +216,11 @@ export async function upsertLeaderboardEntry({ uid, displayName, photoURL, score
     },
     { merge: true }
   );
+  log("leaderboard", "upsertLeaderboardEntry: new high score saved", uid, score);
 }
 
 export async function fetchTopLeaderboard(topN = 100) {
+  log("leaderboard", "fetchTopLeaderboard: querying", topN);
   const q = query(
     collection(db, "leaderboard"),
     orderBy("highestScore", "desc"),
@@ -194,7 +228,9 @@ export async function fetchTopLeaderboard(topN = 100) {
     limit(topN)
   );
   const snap = await getDocs(q);
-  return snap.docs.map((d) => d.data());
+  const entries = snap.docs.map((d) => d.data());
+  log("leaderboard", "fetchTopLeaderboard: got", entries.length, "entries");
+  return entries;
 }
 
 // =====================================================================
@@ -204,9 +240,11 @@ let countryCache = null;
 
 export async function loadCountries() {
   if (countryCache) return countryCache;
+  log("firestore", "loadCountries: fetching services/data.json");
   const res = await fetch("./services/data.json");
   if (!res.ok) throw new Error("Gagal memuat data negara");
   countryCache = await res.json();
+  log("firestore", "loadCountries: loaded", countryCache.length, "negara");
   return countryCache;
 }
 
@@ -216,7 +254,6 @@ export function pickRandomCountry(countries, excludeNames = []) {
   return source[Math.floor(Math.random() * source.length)];
 }
 
-// Build a progressive list of clues for a country, ordered from vague to specific.
 export function buildClueSet(country) {
   const clues = [];
   clues.push(`Negara ini berada di benua ${country.region}${country.subregion ? " (" + country.subregion + ")" : ""}.`);
@@ -266,95 +303,154 @@ export function searchCountryNames(countries, queryStr, max = 6) {
 }
 
 // =====================================================================
-// QUEUE HELPER — collection "queue", doc id = uid (GLOBAL MATCHMAKING)
+// ROOM HELPER — collection "rooms" (private-room multiplayer)
+// Doc id = kode room acak 6 karakter. Tidak ada queue / matchmaking global.
 // =====================================================================
-export async function joinQueue(user) {
-  await setDoc(doc(db, "queue", user.uid), {
-    uid: user.uid,
-    displayName: user.displayName || "Player",
-    photoURL: user.photoURL || "",
-    joinedAt: serverTimestamp(),
-    status: "waiting",
-    gameId: null,
-  });
-}
+const ROOM_CODE_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // tanpa 0/O/1/I agar tak rancu
+const ROOM_CODE_LENGTH = 6;
 
-export async function leaveQueue(uid) {
-  try {
-    await deleteDoc(doc(db, "queue", uid));
-  } catch (_) {
-    /* already removed */
+function generateRoomCode() {
+  let code = "";
+  for (let i = 0; i < ROOM_CODE_LENGTH; i++) {
+    code += ROOM_CODE_CHARS[Math.floor(Math.random() * ROOM_CODE_CHARS.length)];
   }
+  return code;
 }
 
-export function listenWaitingQueue(callback) {
-  const q = query(collection(db, "queue"), where("status", "==", "waiting"), orderBy("joinedAt", "asc"));
-  return onSnapshot(q, (snap) => {
-    callback(snap.docs.map((d) => d.data()));
-  });
+export async function createRoom(hostUser, settings) {
+  log("room", "createRoom: settings", settings);
+  let code = "";
+  let attempts = 0;
+
+  // Pastikan kode belum dipakai room lain yang masih aktif.
+  while (attempts < 8) {
+    const candidate = generateRoomCode();
+    const snap = await getDoc(doc(db, "rooms", candidate));
+    if (!snap.exists()) {
+      code = candidate;
+      break;
+    }
+    attempts += 1;
+  }
+  if (!code) throw new Error("Gagal membuat kode room, coba lagi.");
+
+  const roomData = {
+    code,
+    name: settings.name || "Room",
+    settings: {
+      totalRounds: settings.totalRounds,
+      roundSeconds: settings.roundSeconds,
+      difficulty: settings.difficulty,
+    },
+    host: {
+      uid: hostUser.uid,
+      displayName: hostUser.displayName || "Host",
+      photoURL: hostUser.photoURL || "",
+      score: 0,
+    },
+    guest: null,
+    status: "lobby", // lobby | in_progress | finished
+    round: 0,
+    rounds: [],
+    answers: {},
+    roundStartAt: null,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  };
+
+  await setDoc(doc(db, "rooms", code), roomData);
+  log("room", "createRoom: created", code);
+  return code;
 }
 
-export function listenMyQueueDoc(uid, callback) {
-  return onSnapshot(doc(db, "queue", uid), (snap) => {
-    if (snap.exists()) callback(snap.data());
-  });
-}
+export async function joinRoom(code, guestUser) {
+  const normalizedCode = (code || "").trim().toUpperCase();
+  log("room", "joinRoom: attempt", normalizedCode);
+  const roomRef = doc(db, "rooms", normalizedCode);
 
-// Attempt to pair the two earliest waiting players. Only the client that is
-// itself first-in-line performs this, keeping writes low. A transaction
-// guards against double-matching if two clients race.
-export async function tryPairPlayers(candidateA, candidateB, buildGamePayload) {
-  const gameRef = doc(collection(db, "games"));
   await runTransaction(db, async (tx) => {
-    const qaRef = doc(db, "queue", candidateA.uid);
-    const qbRef = doc(db, "queue", candidateB.uid);
-    const qaSnap = await tx.get(qaRef);
-    const qbSnap = await tx.get(qbRef);
+    const snap = await tx.get(roomRef);
+    if (!snap.exists()) {
+      throw new Error("NOT_FOUND");
+    }
+    const data = snap.data();
 
-    if (!qaSnap.exists() || !qbSnap.exists()) throw new Error("PLAYER_LEFT_QUEUE");
-    if (qaSnap.data().status !== "waiting" || qbSnap.data().status !== "waiting") {
-      throw new Error("ALREADY_MATCHED");
+    if (data.host.uid === guestUser.uid) {
+      throw new Error("OWN_ROOM");
+    }
+    if (data.guest && data.guest.uid !== guestUser.uid) {
+      throw new Error("ROOM_FULL");
     }
 
-    const gamePayload = buildGamePayload(gameRef.id);
-    tx.set(gameRef, gamePayload);
-    tx.update(qaRef, { status: "matched", gameId: gameRef.id });
-    tx.update(qbRef, { status: "matched", gameId: gameRef.id });
+    tx.update(roomRef, {
+      guest: {
+        uid: guestUser.uid,
+        displayName: guestUser.displayName || "Guest",
+        photoURL: guestUser.photoURL || "",
+        score: 0,
+      },
+      updatedAt: serverTimestamp(),
+    });
   });
-  return gameRef.id;
+
+  log("room", "joinRoom: success", normalizedCode);
+  return normalizedCode;
 }
 
-export function countWaitingPlayers(waitingDocs) {
-  return waitingDocs.length;
+export function listenRoom(code, callback) {
+  return onSnapshot(
+    doc(db, "rooms", code),
+    (snap) => {
+      if (snap.exists()) {
+        log("room", "listenRoom: snapshot", code, snap.data().status);
+        callback({ id: snap.id, ...snap.data() });
+      } else {
+        log("room", "listenRoom: room deleted", code);
+        callback(null);
+      }
+    },
+    (err) => logError("room", "listenRoom error", err)
+  );
 }
 
-// =====================================================================
-// GAME HELPER — collection "games" (multiplayer match state)
-// =====================================================================
-export function listenGame(gameId, callback) {
-  return onSnapshot(doc(db, "games", gameId), (snap) => {
-    if (snap.exists()) callback({ id: snap.id, ...snap.data() });
+export async function startRoomGame(code, rounds) {
+  await updateDoc(doc(db, "rooms", code), {
+    status: "in_progress",
+    round: 0,
+    rounds,
+    answers: {},
+    "host.score": 0,
+    "guest.score": 0,
+    roundStartAt: Date.now(),
+    updatedAt: serverTimestamp(),
   });
+  log("game", "startRoomGame", code, "rounds:", rounds.length);
 }
 
-export async function submitMultiplayerAnswer(gameId, uid, payload) {
-  await updateDoc(doc(db, "games", gameId), {
+export async function submitRoomAnswer(code, uid, payload) {
+  await updateDoc(doc(db, "rooms", code), {
     [`answers.${uid}`]: payload,
+    updatedAt: serverTimestamp(),
   });
+  log("game", "submitRoomAnswer", code, uid, payload);
 }
 
-export async function advanceGameRound(gameId, patch) {
-  await updateDoc(doc(db, "games", gameId), patch);
+export async function advanceRoomRound(code, patch) {
+  await updateDoc(doc(db, "rooms", code), { ...patch, updatedAt: serverTimestamp() });
+  log("game", "advanceRoomRound", code, patch);
 }
 
-export async function addScoreToPlayer(gameId, playerKey, points) {
-  await updateDoc(doc(db, "games", gameId), {
-    [`${playerKey}.score`]: increment(points),
+export async function leaveRoom(code, role) {
+  log("room", "leaveRoom", code, role);
+  if (role === "host") {
+    await deleteDoc(doc(db, "rooms", code));
+    return;
+  }
+  await updateDoc(doc(db, "rooms", code), {
+    guest: null,
+    status: "lobby",
+    updatedAt: serverTimestamp(),
   });
-}
-
-export async function finishGame(gameId, patch) {
-  await updateDoc(doc(db, "games", gameId), { status: "finished", ...patch });
 }
 
 // =====================================================================

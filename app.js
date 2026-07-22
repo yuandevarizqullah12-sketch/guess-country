@@ -1,14 +1,27 @@
 // =====================================================================
 // app.js
 // Seluruh logic aplikasi Guess Country.
-// Mengatur navigasi, auth, solo, multiplayer, leaderboard, settings.
+// Navigasi, auth, solo, multiplayer (private room), leaderboard, settings.
 // =====================================================================
 
 import * as api from "./services/api.js";
+import { log, logError } from "./services/api.js";
 
 // =====================================================================
 // GLOBAL STATE
 // =====================================================================
+const EMPTY_PROFILE = {
+  displayName: "Player",
+  photoURL: "",
+  email: "",
+  gamesPlayed: 0,
+  wins: 0,
+  losses: 0,
+  highestScore: 0,
+  bestAccuracy: 0,
+  rating: 1000,
+};
+
 const state = {
   user: null,
   profile: null,
@@ -19,7 +32,6 @@ const state = {
   solo: {
     difficulty: null,
     config: null,
-    countries: [],
     used: [],
     round: 0,
     totalRounds: 0,
@@ -36,26 +48,20 @@ const state = {
     revealTimer: 0,
   },
 
-  multiplayer: {
-    searching: false,
-    searchSeconds: 0,
-    searchInterval: null,
-    queueUnsub: null,
-    myQueueUnsub: null,
-    gameUnsub: null,
-    gameId: null,
-    gameData: null,
-    isPlayer1: false,
+  room: {
+    role: null, // 'host' | 'guest'
+    code: null,
+    data: null,
+    unsub: null,
     lastRenderedRound: -1,
+    lastStatus: null,
     answered: false,
-    localTickInterval: null,
     advancing: false,
-    attemptingMatch: false,
+    resultApplied: false,
+    localTickInterval: null,
+    createOptions: { totalRounds: 10, roundSeconds: 30, difficulty: "medium" },
   },
 };
-
-const MP_TOTAL_ROUNDS = 8;
-const MP_ROUND_SECONDS = 25;
 
 const DIFFICULTY_CONFIG = {
   easy: { label: "Easy", roundSeconds: 40, revealInterval: 7, maxClues: 7, totalRounds: 10, basePoints: 100 },
@@ -63,6 +69,9 @@ const DIFFICULTY_CONFIG = {
   hard: { label: "Hard", roundSeconds: 18, revealInterval: 5, maxClues: 3, totalRounds: 10, basePoints: 200 },
   extreme: { label: "Extreme", roundSeconds: 10, revealInterval: 20, maxClues: 1, totalRounds: 10, basePoints: 320 },
 };
+
+const ROOM_DIFFICULTY_CLUE_COUNT = { easy: 5, medium: 4, hard: 3, extreme: 2 };
+const ROOM_BASE_POINTS = { easy: 100, medium: 150, hard: 200, extreme: 280 };
 
 // =====================================================================
 // DOM SHORTCUTS
@@ -74,11 +83,14 @@ const $$ = (sel) => document.querySelectorAll(sel);
 // BOOTSTRAP
 // =====================================================================
 async function bootstrap() {
+  log("bootstrap", "starting app");
+
   try {
     state.countries = await api.loadCountries();
+    log("bootstrap", "countries loaded", state.countries.length);
   } catch (err) {
+    logError("error", "failed to load countries", err);
     showToast("Gagal memuat database negara. Cek koneksi kamu.", "error");
-    console.error(err);
   }
 
   registerNavigation();
@@ -89,11 +101,13 @@ async function bootstrap() {
   registerModalEvents();
 
   api.onAuthChange(handleAuthChange);
+  log("bootstrap", "event listeners registered, waiting for auth state");
 }
 
 async function handleAuthChange(user) {
   if (user) {
     state.user = user;
+    log("auth", "user signed in", user.uid);
     try {
       const profile = await api.ensureProfile(user);
       state.profile = profile;
@@ -102,13 +116,20 @@ async function handleAuthChange(user) {
       renderUserBadge();
       navigateTo("home");
     } catch (err) {
-      console.error(err);
-      showToast("Gagal memuat profil.", "error");
+      logError("error", "failed to load profile", err);
+      showToast("Gagal memuat profil. Coba muat ulang halaman.", "error");
+      // Tetap tampilkan Home walau profile gagal dimuat, agar app tidak stuck.
+      state.profile = EMPTY_PROFILE;
+      showAuthedUI();
+      renderUserBadge();
+      navigateTo("home");
     }
   } else {
     state.user = null;
     state.profile = null;
+    log("auth", "user signed out");
     if (state.profileUnsub) state.profileUnsub();
+    cleanupRoomState();
     hideAuthedUI();
     navigateTo("login");
   }
@@ -119,8 +140,9 @@ function subscribeProfile(uid) {
   if (state.profileUnsub) state.profileUnsub();
   state.profileUnsub = api.listenProfile(uid, (profile) => {
     state.profile = profile;
-    renderHomeStats();
-    renderSettingsPage();
+    log("render", "profile snapshot received, re-rendering dependent pages");
+    if (state.currentPage === "home") renderHomePage();
+    if (state.currentPage === "settings") renderSettingsPage();
   });
 }
 
@@ -129,8 +151,16 @@ function hideLoadingScreen() {
 }
 
 // =====================================================================
-// NAVIGATION
+// NAVIGATION — dispatcher memastikan setiap page SELALU dirender.
 // =====================================================================
+const PAGE_RENDERERS = {
+  home: renderHomePage,
+  leaderboard: renderLeaderboardPage,
+  settings: renderSettingsPage,
+  solo: renderSoloPage,
+  multiplayer: renderMultiplayerPage,
+};
+
 function registerNavigation() {
   $$(".nav-btn").forEach((btn) => {
     btn.addEventListener("click", () => navigateTo(btn.dataset.page));
@@ -139,10 +169,15 @@ function registerNavigation() {
 
 function navigateTo(pageName) {
   if (pageName !== "login" && !state.user) pageName = "login";
+  log("navigation", "navigating to", pageName);
 
   $$(".page").forEach((page) => page.classList.remove("active"));
   const target = $(`page-${pageName}`);
-  if (target) target.classList.add("active");
+  if (!target) {
+    logError("error", "navigateTo: target page not found in DOM", pageName);
+    return;
+  }
+  target.classList.add("active");
 
   $$(".nav-btn").forEach((btn) => {
     btn.classList.toggle("active", btn.dataset.page === pageName);
@@ -150,13 +185,15 @@ function navigateTo(pageName) {
 
   state.currentPage = pageName;
 
-  if (pageName === "leaderboard") renderLeaderboard();
-  if (pageName === "settings") renderSettingsPage();
-  if (pageName === "home") renderHomeStats();
-
-  // Leaving multiplayer mid-match cleans up listeners to avoid leaks.
-  if (pageName !== "multiplayer") {
-    cleanupSearching(false);
+  const renderer = PAGE_RENDERERS[pageName];
+  if (renderer) {
+    try {
+      renderer();
+      log("render", `page-${pageName} rendered successfully`);
+    } catch (err) {
+      logError("error", `render page-${pageName} failed`, err);
+      showToast("Terjadi kesalahan saat menampilkan halaman.", "error");
+    }
   }
 }
 
@@ -179,7 +216,7 @@ function registerAuthEvents() {
       await api.signInWithGoogle();
       showToast("Berhasil masuk!", "success");
     } catch (err) {
-      console.error(err);
+      logError("error", "google sign-in failed", err);
       showToast("Gagal masuk dengan Google.", "error");
     }
   });
@@ -196,8 +233,13 @@ function registerAuthEvents() {
     $("modal-cancel-logout").addEventListener("click", closeModal);
     $("modal-confirm-logout").addEventListener("click", async () => {
       closeModal();
-      await api.signOutUser();
-      showToast("Kamu telah keluar.", "success");
+      try {
+        await api.signOutUser();
+        showToast("Kamu telah keluar.", "success");
+      } catch (err) {
+        logError("error", "logout failed", err);
+        showToast("Gagal keluar.", "error");
+      }
     });
   });
 }
@@ -242,11 +284,10 @@ function closeModal() {
 }
 
 // =====================================================================
-// HOME
+// HOME — selalu render, walau profile belum siap (pakai default).
 // =====================================================================
-function renderHomeStats() {
-  if (!state.profile) return;
-  const p = state.profile;
+function renderHomePage() {
+  const p = state.profile || EMPTY_PROFILE;
   $("home-stat-highscore").textContent = p.highestScore || 0;
   $("home-stat-rating").textContent = p.rating || 0;
   const totalMatches = (p.wins || 0) + (p.losses || 0);
@@ -257,6 +298,14 @@ function renderHomeStats() {
 // =====================================================================
 // SOLO MODE
 // =====================================================================
+function renderSoloPage() {
+  // Pastikan tampilan solo selalu kembali ke setup jika belum ada game aktif.
+  if (state.solo.tickInterval) return; // sedang bermain, biarkan apa adanya
+  $("solo-game-area").classList.add("hidden");
+  $("solo-result").classList.add("hidden");
+  $("solo-setup").classList.remove("hidden");
+}
+
 function registerSoloEvents() {
   $$("#solo-difficulty-select .difficulty-card").forEach((card) => {
     card.addEventListener("click", () => {
@@ -271,8 +320,7 @@ function registerSoloEvents() {
 
   $("solo-answer-form").addEventListener("submit", (e) => {
     e.preventDefault();
-    const value = $("solo-answer-input").value;
-    handleSoloAnswer(value);
+    handleSoloAnswer($("solo-answer-input").value);
   });
 
   $("solo-skip-btn").addEventListener("click", () => handleSoloAnswer(null));
@@ -298,6 +346,7 @@ function registerSoloEvents() {
 function startSoloGame() {
   const difficulty = state.solo.difficulty;
   if (!difficulty) return;
+  log("game", "solo game started", difficulty);
   const config = DIFFICULTY_CONFIG[difficulty];
 
   Object.assign(state.solo, {
@@ -360,6 +409,7 @@ function soloTick() {
 
   if (s.timeLeft <= 0) {
     clearInterval(s.tickInterval);
+    s.tickInterval = null;
     handleSoloAnswer(null);
   }
 }
@@ -379,7 +429,10 @@ function renderSoloTimer() {
 
 function handleSoloAnswer(rawInput) {
   const s = state.solo;
-  if (s.tickInterval) clearInterval(s.tickInterval);
+  if (s.tickInterval) {
+    clearInterval(s.tickInterval);
+    s.tickInterval = null;
+  }
 
   s.totalAnswered += 1;
   const correct = rawInput ? api.isAnswerCorrect(rawInput, s.currentCountry) : false;
@@ -407,6 +460,7 @@ function handleSoloAnswer(rawInput) {
 
 async function endSoloGame() {
   const s = state.solo;
+  log("game", "solo game finished", { score: s.score, correct: s.correctCount, total: s.totalAnswered });
   $("solo-game-area").classList.add("hidden");
   $("solo-result").classList.remove("hidden");
 
@@ -433,7 +487,7 @@ async function endSoloGame() {
       isMultiplayer: false,
     });
   } catch (err) {
-    console.error(err);
+    logError("error", "failed to save solo result", err);
     showToast("Gagal menyimpan hasil ke server.", "error");
   }
 }
@@ -453,7 +507,7 @@ function renderSuggestions(inputId, listId, onPick) {
   }
 
   list.innerHTML = matches
-    .map((name) => `<div class="suggestion-item" data-name="${name}">${name}</div>`)
+    .map((name) => `<div class="suggestion-item" data-name="${escapeHtml(name)}">${escapeHtml(name)}</div>`)
     .join("");
   list.classList.remove("hidden");
 
@@ -463,344 +517,491 @@ function renderSuggestions(inputId, listId, onPick) {
 }
 
 // =====================================================================
-// MULTIPLAYER MODE
+// MULTIPLAYER — PRIVATE ROOM (tanpa queue / matchmaking global)
 // =====================================================================
+function renderMultiplayerPage() {
+  // Jika sedang berada dalam room aktif, tampilkan view sesuai status room.
+  if (state.room.code && state.room.data) {
+    renderRoomByStatus(state.room.data);
+    return;
+  }
+  showMpView("intro");
+}
+
+function showMpView(viewName) {
+  $$(".mp-view").forEach((v) => v.classList.remove("active"));
+  const target = $(`mp-view-${viewName}`);
+  if (target) target.classList.add("active");
+}
+
 function registerMultiplayerEvents() {
-  $("btn-find-match").addEventListener("click", startSearching);
-  $("btn-cancel-search").addEventListener("click", () => cleanupSearching(true));
+  $("btn-mp-create-room").addEventListener("click", () => showMpView("create-form"));
+  $("btn-mp-create-cancel").addEventListener("click", () => showMpView("intro"));
+  $("btn-mp-join-room-open").addEventListener("click", () => {
+    $("mp-join-error").classList.add("hidden");
+    $("mp-join-code-input").value = "";
+    showMpView("join-form");
+  });
+  $("btn-mp-join-cancel").addEventListener("click", () => showMpView("intro"));
+
+  registerOptionRow("mp-rounds-options");
+  registerOptionRow("mp-duration-options");
+  registerOptionRow("mp-difficulty-options");
+
+  $("btn-mp-create-submit").addEventListener("click", createRoomFlow);
+  $("btn-mp-join-submit").addEventListener("click", joinRoomFlow);
+  $("btn-mp-copy-code").addEventListener("click", copyRoomCode);
+  $("btn-mp-cancel-room").addEventListener("click", leaveRoomFlow);
+  $("btn-mp-start-game").addEventListener("click", startRoomGameFlow);
+  $("btn-mp-leave-lobby").addEventListener("click", leaveRoomFlow);
+  $("btn-mp-leave-result").addEventListener("click", leaveRoomFlow);
+  $("btn-mp-rematch").addEventListener("click", rematchRoomFlow);
 
   $("mp-answer-form").addEventListener("submit", (e) => {
     e.preventDefault();
-    submitMultiplayerAnswer();
+    submitRoomAnswerFlow();
   });
-
   $("mp-answer-input").addEventListener("input", () => {
     renderSuggestions("mp-answer-input", "mp-suggestions", (name) => {
       $("mp-answer-input").value = name;
       $("mp-suggestions").classList.add("hidden");
     });
   });
+}
 
-  $("btn-mp-rematch").addEventListener("click", () => {
-    $("multiplayer-result").classList.add("hidden");
-    $("multiplayer-intro").classList.remove("hidden");
-  });
-
-  $("btn-mp-exit").addEventListener("click", () => {
-    $("multiplayer-result").classList.add("hidden");
-    $("multiplayer-intro").classList.remove("hidden");
-    navigateTo("home");
+function registerOptionRow(containerId) {
+  const container = $(containerId);
+  container.querySelectorAll(".mp-option-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      container.querySelectorAll(".mp-option-btn").forEach((b) => b.classList.remove("selected"));
+      btn.classList.add("selected");
+      container.dataset.value = btn.dataset.value;
+    });
   });
 }
 
-async function startSearching() {
+async function createRoomFlow() {
   if (!state.user) return;
-  const mp = state.multiplayer;
-  mp.searching = true;
-  mp.searchSeconds = 0;
-  mp.attemptingMatch = false;
-
-  $("multiplayer-intro").classList.add("hidden");
-  $("multiplayer-searching").classList.remove("hidden");
-  $("search-timer").textContent = "00";
-  $("queue-count").textContent = "0";
-
-  mp.searchInterval = setInterval(() => {
-    mp.searchSeconds += 1;
-    $("search-timer").textContent = String(mp.searchSeconds).padStart(2, "0");
-  }, 1000);
+  const settings = {
+    name: $("mp-room-name-input").value.trim() || "Room",
+    totalRounds: parseInt($("mp-rounds-options").dataset.value, 10),
+    roundSeconds: parseInt($("mp-duration-options").dataset.value, 10),
+    difficulty: $("mp-difficulty-options").dataset.value,
+  };
 
   try {
-    await api.joinQueue(state.user);
+    const code = await api.createRoom(state.user, settings);
+    resetRoomState();
+    state.room.role = "host";
+    state.room.code = code;
+    subscribeRoom(code);
+    $("mp-room-code-display").textContent = code;
+    showMpView("waiting");
   } catch (err) {
-    console.error(err);
-    showToast("Gagal bergabung ke antrean.", "error");
-    cleanupSearching(true);
+    logError("error", "createRoomFlow failed", err);
+    showToast("Gagal membuat room. Coba lagi.", "error");
+  }
+}
+
+async function joinRoomFlow() {
+  if (!state.user) return;
+  const code = $("mp-join-code-input").value.trim().toUpperCase();
+  const errorEl = $("mp-join-error");
+  errorEl.classList.add("hidden");
+
+  if (!code) {
+    errorEl.textContent = "Masukkan kode room.";
+    errorEl.classList.remove("hidden");
     return;
   }
 
-  mp.queueUnsub = api.listenWaitingQueue(handleQueueSnapshot);
-  mp.myQueueUnsub = api.listenMyQueueDoc(state.user.uid, handleMyQueueUpdate);
-}
-
-async function handleQueueSnapshot(waitingDocs) {
-  const mp = state.multiplayer;
-  $("queue-count").textContent = String(api.countWaitingPlayers(waitingDocs));
-
-  if (!mp.searching || mp.attemptingMatch) return;
-  if (waitingDocs.length < 2) return;
-  if (waitingDocs[0].uid !== state.user.uid) return;
-
-  mp.attemptingMatch = true;
-  const [playerA, playerB] = waitingDocs;
-
   try {
-    await api.tryPairPlayers(playerA, playerB, (gameId) => buildMultiplayerGamePayload(playerA, playerB));
+    await api.joinRoom(code, state.user);
+    resetRoomState();
+    state.room.role = "guest";
+    state.room.code = code;
+    subscribeRoom(code);
   } catch (err) {
-    // Another client may have matched first, or a player left — safe to retry on next snapshot.
-    mp.attemptingMatch = false;
+    logError("room", "joinRoomFlow failed", err.message);
+    let message = "Gagal bergabung ke room.";
+    if (err.message === "NOT_FOUND") message = "Room tidak ditemukan.";
+    else if (err.message === "ROOM_FULL") message = "Room sudah penuh.";
+    else if (err.message === "OWN_ROOM") message = "Kamu tidak bisa join room milikmu sendiri.";
+    errorEl.textContent = message;
+    errorEl.classList.remove("hidden");
   }
 }
 
-function buildMultiplayerGamePayload(playerA, playerB) {
+function subscribeRoom(code) {
+  if (state.room.unsub) state.room.unsub();
+  state.room.unsub = api.listenRoom(code, handleRoomSnapshot);
+}
+
+function handleRoomSnapshot(roomData) {
+  if (!roomData) {
+    if (state.room.code) {
+      showToast("Room telah ditutup.", "error");
+      cleanupRoomState();
+      if (state.currentPage === "multiplayer") showMpView("intro");
+    }
+    return;
+  }
+  state.room.data = roomData;
+  if (state.currentPage === "multiplayer") {
+    renderRoomByStatus(roomData);
+  }
+}
+
+function renderRoomByStatus(roomData) {
+  const isHost = roomData.host.uid === state.user.uid;
+  state.room.role = isHost ? "host" : "guest";
+
+  if (roomData.status === "lobby") {
+    if (!roomData.guest && isHost) {
+      $("mp-room-code-display").textContent = roomData.code;
+      showMpView("waiting");
+      return;
+    }
+    renderLobby(roomData, isHost);
+    showMpView("lobby");
+    return;
+  }
+
+  if (roomData.status === "in_progress") {
+    state.room.resultApplied = false;
+    state.room.lastStatus = "in_progress";
+    renderRoomScoreboard(roomData);
+    showMpView("game");
+    handleRoomRoundUpdate(roomData, isHost);
+    return;
+  }
+
+  if (roomData.status === "finished") {
+    renderRoomScoreboard(roomData);
+    renderRoomResult(roomData, isHost);
+    showMpView("result");
+  }
+}
+
+function renderLobby(roomData, isHost) {
+  $("mp-lobby-room-name").textContent = roomData.name;
+  $("mp-lobby-host-avatar").src = roomData.host.photoURL || "";
+  $("mp-lobby-host-name").textContent = roomData.host.displayName;
+
+  if (roomData.guest) {
+    $("mp-lobby-guest-avatar").src = roomData.guest.photoURL || "";
+    $("mp-lobby-guest-name").textContent = roomData.guest.displayName;
+  } else {
+    $("mp-lobby-guest-avatar").src = "";
+    $("mp-lobby-guest-name").textContent = "Menunggu…";
+  }
+
+  const s = roomData.settings;
+  $("mp-lobby-settings-summary").textContent = `${s.totalRounds} Ronde · ${s.roundSeconds}s / ronde · ${capitalize(s.difficulty)}`;
+
+  const startBtn = $("btn-mp-start-game");
+  const waitingText = $("mp-lobby-waiting-text");
+  if (isHost) {
+    startBtn.classList.toggle("hidden", !roomData.guest);
+    waitingText.classList.toggle("hidden", !!roomData.guest);
+    if (!roomData.guest) waitingText.textContent = "Menunggu pemain kedua bergabung…";
+  } else {
+    startBtn.classList.add("hidden");
+    waitingText.classList.remove("hidden");
+    waitingText.textContent = "Menunggu host memulai permainan…";
+  }
+}
+
+async function startRoomGameFlow() {
+  const roomData = state.room.data;
+  if (!roomData || state.room.role !== "host") return;
+  log("game", "host starting room game", roomData.code);
+  const rounds = buildRoomRounds(roomData.settings.totalRounds);
+  try {
+    await api.startRoomGame(roomData.code, rounds);
+  } catch (err) {
+    logError("error", "startRoomGameFlow failed", err);
+    showToast("Gagal memulai permainan.", "error");
+  }
+}
+
+function buildRoomRounds(totalRounds) {
   const rounds = [];
   const used = [];
-  for (let i = 0; i < MP_TOTAL_ROUNDS; i++) {
+  for (let i = 0; i < totalRounds; i++) {
     const country = api.pickRandomCountry(state.countries, used);
     used.push(country.name);
-    rounds.push({
-      countryName: country.name,
-      clues: api.buildClueSet(country),
-    });
+    rounds.push({ countryName: country.name, clues: api.buildClueSet(country) });
   }
-
-  return {
-    player1: { uid: playerA.uid, displayName: playerA.displayName, photoURL: playerA.photoURL, score: 0 },
-    player2: { uid: playerB.uid, displayName: playerB.displayName, photoURL: playerB.photoURL, score: 0 },
-    difficulty: "Medium",
-    totalRounds: MP_TOTAL_ROUNDS,
-    roundSeconds: MP_ROUND_SECONDS,
-    round: 0,
-    rounds,
-    status: "in_progress",
-    answers: {},
-    roundStartAt: Date.now(),
-    createdAt: Date.now(),
-  };
+  return rounds;
 }
 
-function handleMyQueueUpdate(data) {
-  const mp = state.multiplayer;
-  if (data.status === "matched" && data.gameId) {
-    if (mp.queueUnsub) mp.queueUnsub();
-    if (mp.myQueueUnsub) mp.myQueueUnsub();
-    if (mp.searchInterval) clearInterval(mp.searchInterval);
-    api.leaveQueue(state.user.uid);
-
-    mp.searching = false;
-    mp.gameId = data.gameId;
-    mp.lastRenderedRound = -1;
-
-    $("multiplayer-searching").classList.add("hidden");
-    $("multiplayer-game").classList.remove("hidden");
-
-    mp.gameUnsub = api.listenGame(mp.gameId, handleGameSnapshot);
-  }
+function renderRoomScoreboard(roomData) {
+  $("mp-host-avatar").src = roomData.host.photoURL || "";
+  $("mp-host-name").textContent = roomData.host.displayName;
+  $("mp-host-score").textContent = roomData.host.score || 0;
+  $("mp-guest-avatar").src = roomData.guest ? roomData.guest.photoURL || "" : "";
+  $("mp-guest-name").textContent = roomData.guest ? roomData.guest.displayName : "Guest";
+  $("mp-guest-score").textContent = roomData.guest ? roomData.guest.score || 0 : 0;
 }
 
-function cleanupSearching(navigateBack) {
-  const mp = state.multiplayer;
-  if (mp.searchInterval) clearInterval(mp.searchInterval);
-  if (mp.queueUnsub) mp.queueUnsub();
-  if (mp.myQueueUnsub) mp.myQueueUnsub();
-  mp.searchInterval = null;
-  mp.queueUnsub = null;
-  mp.myQueueUnsub = null;
+function handleRoomRoundUpdate(roomData, isHost) {
+  if (roomData.round !== state.room.lastRenderedRound) {
+    state.room.lastRenderedRound = roomData.round;
+    state.room.answered = false;
 
-  if (mp.searching && state.user) {
-    api.leaveQueue(state.user.uid);
-  }
-  mp.searching = false;
-  mp.attemptingMatch = false;
-
-  if (navigateBack) {
-    $("multiplayer-searching").classList.add("hidden");
-    $("multiplayer-intro").classList.remove("hidden");
-  }
-}
-
-function handleGameSnapshot(gameData) {
-  const mp = state.multiplayer;
-  mp.gameData = gameData;
-  mp.isPlayer1 = gameData.player1.uid === state.user.uid;
-
-  renderMultiplayerScoreboard(gameData);
-
-  if (gameData.status === "finished") {
-    if (mp.localTickInterval) clearInterval(mp.localTickInterval);
-    finishMultiplayerLocally(gameData);
-    return;
-  }
-
-  if (gameData.round !== mp.lastRenderedRound) {
-    mp.lastRenderedRound = gameData.round;
-    mp.answered = false;
     $("mp-answer-input").value = "";
     $("mp-answer-input").disabled = false;
     $("mp-suggestions").classList.add("hidden");
     $("mp-round-status").textContent = "";
-    $("mp-round").textContent = `${gameData.round + 1}/${gameData.totalRounds}`;
+    $("mp-round").textContent = `${roomData.round + 1}/${roomData.rounds.length}`;
 
-    const roundInfo = gameData.rounds[gameData.round];
-    $("mp-clue-text").innerHTML = roundInfo.clues.slice(0, 3).join("<br><br>");
+    const roundInfo = roomData.rounds[roomData.round];
+    const clueCount = ROOM_DIFFICULTY_CLUE_COUNT[roomData.settings.difficulty] || 4;
+    $("mp-clue-text").innerHTML = roundInfo.clues.slice(0, clueCount).join("<br><br>");
 
-    startMultiplayerLocalTimer(gameData);
+    startRoomLocalTimer(roomData);
   }
 
-  updateMultiplayerRoundStatus(gameData);
+  updateRoomRoundStatus(roomData);
 }
 
-function startMultiplayerLocalTimer(gameData) {
-  const mp = state.multiplayer;
-  if (mp.localTickInterval) clearInterval(mp.localTickInterval);
+function startRoomLocalTimer(roomData) {
+  if (state.room.localTickInterval) clearInterval(state.room.localTickInterval);
 
   const tick = () => {
-    const elapsed = (Date.now() - gameData.roundStartAt) / 1000;
-    const remaining = Math.max(gameData.roundSeconds - elapsed, 0);
+    const elapsed = (Date.now() - roomData.roundStartAt) / 1000;
+    const remaining = Math.max(roomData.settings.roundSeconds - elapsed, 0);
     $("mp-timer").textContent = String(Math.ceil(remaining)).padStart(2, "0");
-    const pct = Math.max((remaining / gameData.roundSeconds) * 100, 0);
+    const pct = Math.max((remaining / roomData.settings.roundSeconds) * 100, 0);
     const bar = $("mp-timer-bar");
     bar.style.width = pct + "%";
-    bar.classList.toggle("warning", remaining <= gameData.roundSeconds * 0.3);
+    bar.classList.toggle("warning", remaining <= roomData.settings.roundSeconds * 0.3);
 
     if (remaining <= 0) {
-      clearInterval(mp.localTickInterval);
-      if (!mp.answered) {
+      clearInterval(state.room.localTickInterval);
+      if (!state.room.answered) {
         $("mp-answer-input").disabled = true;
-        mp.answered = true;
+        state.room.answered = true;
       }
-      if (mp.isPlayer1) maybeAdvanceRound(mp.gameData);
+      const isHost = roomData.host.uid === state.user.uid;
+      if (isHost) maybeAdvanceRoomRound(roomData);
     }
   };
 
   tick();
-  mp.localTickInterval = setInterval(tick, 250);
+  state.room.localTickInterval = setInterval(tick, 250);
 }
 
-function updateMultiplayerRoundStatus(gameData) {
-  const answers = gameData.answers || {};
-  const oppUid = state.multiplayer.isPlayer1 ? gameData.player2.uid : gameData.player1.uid;
-  if (answers[oppUid] && !state.multiplayer.answered) {
+function updateRoomRoundStatus(roomData) {
+  const answers = roomData.answers || {};
+  const isHost = roomData.host.uid === state.user.uid;
+  const oppUid = isHost ? (roomData.guest && roomData.guest.uid) : roomData.host.uid;
+
+  if (oppUid && answers[oppUid] && !state.room.answered) {
     $("mp-round-status").textContent = "Lawan sudah menjawab — cepat!";
   }
-  if (state.multiplayer.answered) {
+  if (state.room.answered) {
     $("mp-round-status").textContent = "Jawaban terkirim. Menunggu ronde berakhir…";
   }
 
-  const bothAnswered = answers[gameData.player1.uid] && answers[gameData.player2.uid];
-  if (bothAnswered && state.multiplayer.isPlayer1) {
-    maybeAdvanceRound(gameData);
+  const bothAnswered = roomData.guest && answers[roomData.host.uid] && answers[roomData.guest.uid];
+  if (bothAnswered && isHost) {
+    maybeAdvanceRoomRound(roomData);
   }
 }
 
-async function submitMultiplayerAnswer() {
-  const mp = state.multiplayer;
-  if (mp.answered || !mp.gameData) return;
+async function submitRoomAnswerFlow() {
+  const roomData = state.room.data;
+  if (state.room.answered || !roomData) return;
   const value = $("mp-answer-input").value;
   if (!value.trim()) return;
 
-  mp.answered = true;
+  state.room.answered = true;
   $("mp-answer-input").disabled = true;
 
-  const roundInfo = mp.gameData.rounds[mp.gameData.round];
+  const roundInfo = roomData.rounds[roomData.round];
   const correct = api.normalizeAnswer(value) === api.normalizeAnswer(roundInfo.countryName);
-  const timeMs = Date.now() - mp.gameData.roundStartAt;
+  const timeMs = Date.now() - roomData.roundStartAt;
 
   try {
-    await api.submitMultiplayerAnswer(mp.gameId, state.user.uid, { correct, timeMs, value });
+    await api.submitRoomAnswer(roomData.code, state.user.uid, { correct, timeMs, value });
     showToast(correct ? "Jawaban terkirim — benar!" : "Jawaban terkirim.", correct ? "success" : "info");
   } catch (err) {
-    console.error(err);
+    logError("error", "submitRoomAnswerFlow failed", err);
   }
 }
 
-async function maybeAdvanceRound(gameData) {
-  const mp = state.multiplayer;
-  if (mp.advancing) return;
-  mp.advancing = true;
+async function maybeAdvanceRoomRound(roomData) {
+  if (state.room.advancing) return;
+  state.room.advancing = true;
 
   try {
-    const answers = gameData.answers || {};
-    const p1 = gameData.player1;
-    const p2 = gameData.player2;
-    const a1 = answers[p1.uid];
-    const a2 = answers[p2.uid];
+    const answers = roomData.answers || {};
+    const host = roomData.host;
+    const guest = roomData.guest;
+    const aHost = answers[host.uid];
+    const aGuest = guest ? answers[guest.uid] : null;
+    const basePoints = ROOM_BASE_POINTS[roomData.settings.difficulty] || 150;
+    const roundMs = roomData.settings.roundSeconds * 1000;
 
-    let score1 = 0;
-    let score2 = 0;
-    const basePoints = 150;
+    let hostGain = 0;
+    let guestGain = 0;
 
-    if (a1 && a1.correct) score1 += Math.round(basePoints * Math.max(1 - a1.timeMs / (gameData.roundSeconds * 1000), 0.2));
-    if (a2 && a2.correct) score2 += Math.round(basePoints * Math.max(1 - a2.timeMs / (gameData.roundSeconds * 1000), 0.2));
-    if (a1 && a1.correct && (!a2 || !a2.correct || a1.timeMs < a2.timeMs)) score1 += 40;
-    if (a2 && a2.correct && (!a1 || !a1.correct || a2.timeMs < a1.timeMs)) score2 += 40;
+    if (aHost && aHost.correct) hostGain += Math.round(basePoints * Math.max(1 - aHost.timeMs / roundMs, 0.2));
+    if (aGuest && aGuest.correct) guestGain += Math.round(basePoints * Math.max(1 - aGuest.timeMs / roundMs, 0.2));
 
-    const nextRound = gameData.round + 1;
-    const isLastRound = nextRound >= gameData.totalRounds;
+    if (aHost && aHost.correct && (!aGuest || !aGuest.correct || aHost.timeMs < aGuest.timeMs)) hostGain += 40;
+    if (aGuest && aGuest.correct && (!aHost || !aHost.correct || aGuest.timeMs < aHost.timeMs)) guestGain += 40;
+
+    const nextRound = roomData.round + 1;
+    const isLastRound = nextRound >= roomData.rounds.length;
 
     const patch = {
-      "player1.score": (p1.score || 0) + score1,
-      "player2.score": (p2.score || 0) + score2,
+      "host.score": (host.score || 0) + hostGain,
+      "guest.score": (guest ? guest.score || 0 : 0) + guestGain,
       answers: {},
-      round: isLastRound ? gameData.round : nextRound,
+      round: isLastRound ? roomData.round : nextRound,
       roundStartAt: Date.now(),
       status: isLastRound ? "finished" : "in_progress",
     };
 
-    await api.advanceGameRound(mp.gameId, patch);
+    await api.advanceRoomRound(roomData.code, patch);
+    log("game", "round advanced", roomData.code, patch);
   } catch (err) {
-    console.error(err);
+    logError("error", "maybeAdvanceRoomRound failed", err);
   } finally {
-    mp.advancing = false;
+    state.room.advancing = false;
   }
 }
 
-function renderMultiplayerScoreboard(gameData) {
-  $("mp-player1-avatar").src = gameData.player1.photoURL || "";
-  $("mp-player1-name").textContent = gameData.player1.displayName;
-  $("mp-player1-score").textContent = gameData.player1.score || 0;
-  $("mp-player2-avatar").src = gameData.player2.photoURL || "";
-  $("mp-player2-name").textContent = gameData.player2.displayName;
-  $("mp-player2-score").textContent = gameData.player2.score || 0;
+async function renderRoomResult(roomData, isHost) {
+  const hostScore = roomData.host.score || 0;
+  const guestScore = roomData.guest ? roomData.guest.score || 0 : 0;
+
+  $("mp-result-host-score").textContent = hostScore;
+  $("mp-result-guest-score").textContent = guestScore;
+
+  let title = "Seri!";
+  let emoji = "🤝";
+  if (hostScore > guestScore) {
+    title = "Host Menang!";
+    emoji = "🏆";
+  } else if (guestScore > hostScore) {
+    title = "Guest Menang!";
+    emoji = "🏆";
+  }
+  $("mp-result-title").textContent = title;
+  $("mp-result-emoji").textContent = emoji;
+  $("btn-mp-rematch").classList.toggle("hidden", !isHost);
+
+  if (state.room.lastStatus !== "finished") {
+    state.room.lastStatus = "finished";
+    if (!state.room.resultApplied) {
+      state.room.resultApplied = true;
+      const myScore = isHost ? hostScore : guestScore;
+      const oppScore = isHost ? guestScore : hostScore;
+      const won = myScore > oppScore ? true : myScore < oppScore ? false : null;
+      try {
+        await api.applyGameResultToProfile(state.user.uid, {
+          score: myScore,
+          accuracy: 0,
+          won,
+          isMultiplayer: true,
+        });
+      } catch (err) {
+        logError("error", "failed to apply multiplayer result to profile", err);
+      }
+    }
+  }
 }
 
-let finishedHandled = false;
-async function finishMultiplayerLocally(gameData) {
-  if (finishedHandled) return;
-  finishedHandled = true;
-
-  if (state.multiplayer.gameUnsub) state.multiplayer.gameUnsub();
-
-  const isPlayer1 = gameData.player1.uid === state.user.uid;
-  const myScore = isPlayer1 ? gameData.player1.score : gameData.player2.score;
-  const oppScore = isPlayer1 ? gameData.player2.score : gameData.player1.score;
-  const won = myScore > oppScore ? true : myScore < oppScore ? false : null;
-
-  $("multiplayer-game").classList.add("hidden");
-  $("multiplayer-result").classList.remove("hidden");
-  $("mp-result-emoji").textContent = won === true ? "🏆" : won === false ? "😔" : "🤝";
-  $("mp-result-title").textContent = won === true ? "Kamu Menang!" : won === false ? "Kamu Kalah" : "Seri!";
-  $("mp-result-myscore").textContent = myScore;
-  $("mp-result-oppscore").textContent = oppScore;
-
+async function rematchRoomFlow() {
+  const roomData = state.room.data;
+  if (!roomData || state.room.role !== "host") return;
+  const rounds = buildRoomRounds(roomData.settings.totalRounds);
   try {
-    await api.applyGameResultToProfile(state.user.uid, {
-      score: myScore,
-      accuracy: 0,
-      won,
-      isMultiplayer: true,
-    });
+    await api.startRoomGame(roomData.code, rounds);
+    showToast("Rematch dimulai!", "success");
   } catch (err) {
-    console.error(err);
+    logError("error", "rematchRoomFlow failed", err);
+    showToast("Gagal memulai rematch.", "error");
   }
+}
 
-  setTimeout(() => {
-    finishedHandled = false;
-  }, 500);
+async function copyRoomCode() {
+  if (!state.room.code) return;
+  try {
+    await navigator.clipboard.writeText(state.room.code);
+    showToast("Kode room disalin!", "success");
+  } catch (err) {
+    logError("error", "clipboard copy failed", err);
+    showToast("Gagal menyalin kode. Salin manual: " + state.room.code, "error");
+  }
+}
+
+async function leaveRoomFlow() {
+  const code = state.room.code;
+  const role = state.room.role;
+  if (!code) {
+    showMpView("intro");
+    return;
+  }
+  try {
+    await api.leaveRoom(code, role);
+  } catch (err) {
+    logError("error", "leaveRoomFlow failed", err);
+  }
+  cleanupRoomState();
+  showMpView("intro");
+}
+
+function resetRoomState() {
+  if (state.room.unsub) state.room.unsub();
+  if (state.room.localTickInterval) clearInterval(state.room.localTickInterval);
+  state.room = {
+    role: null,
+    code: null,
+    data: null,
+    unsub: null,
+    lastRenderedRound: -1,
+    lastStatus: null,
+    answered: false,
+    advancing: false,
+    resultApplied: false,
+    localTickInterval: null,
+    createOptions: { totalRounds: 10, roundSeconds: 30, difficulty: "medium" },
+  };
+}
+
+function cleanupRoomState() {
+  resetRoomState();
+}
+
+function capitalize(str) {
+  if (!str) return "";
+  return str.charAt(0).toUpperCase() + str.slice(1);
 }
 
 // =====================================================================
-// LEADERBOARD
+// LEADERBOARD — loading / empty / error state selalu ditangani eksplisit.
 // =====================================================================
-async function renderLeaderboard() {
+async function renderLeaderboardPage() {
   const container = $("leaderboard-list");
-  container.innerHTML = `<p class="leaderboard-empty">Memuat leaderboard…</p>`;
+  container.innerHTML = `<p class="leaderboard-state">Memuat leaderboard…</p>`;
+  log("leaderboard", "rendering leaderboard page");
+
   try {
     const entries = await api.fetchTopLeaderboard(100);
+
+    if (state.currentPage !== "leaderboard") return; // pengguna sudah pindah halaman
+
     if (!entries.length) {
-      container.innerHTML = `<p class="leaderboard-empty">Belum ada data. Jadilah yang pertama!</p>`;
+      container.innerHTML = `<p class="leaderboard-state">Belum ada data. Jadilah yang pertama bermain Solo Mode!</p>`;
+      log("leaderboard", "empty state");
       return;
     }
+
     container.innerHTML = entries
       .map((entry, index) => {
         const isMe = state.user && entry.uid === state.user.uid;
@@ -817,9 +1018,11 @@ async function renderLeaderboard() {
         `;
       })
       .join("");
+    log("leaderboard", "rendered", entries.length, "entries");
   } catch (err) {
-    console.error(err);
-    container.innerHTML = `<p class="leaderboard-empty">Gagal memuat leaderboard.</p>`;
+    logError("error", "renderLeaderboardPage failed", err);
+    if (state.currentPage !== "leaderboard") return;
+    container.innerHTML = `<p class="leaderboard-state is-error">Gagal memuat leaderboard. Periksa koneksi atau Firestore rules/index kamu.</p>`;
   }
 }
 
@@ -830,7 +1033,7 @@ function escapeHtml(str) {
 }
 
 // =====================================================================
-// SETTINGS
+// SETTINGS — selalu render, walau profile belum siap (pakai default).
 // =====================================================================
 function registerSettingsEvents() {
   $("btn-save-name").addEventListener("click", async () => {
@@ -840,18 +1043,17 @@ function registerSettingsEvents() {
       await api.updateProfileName(state.user.uid, newName);
       showToast("Nama berhasil diperbarui.", "success");
     } catch (err) {
-      console.error(err);
+      logError("error", "updateProfileName failed", err);
       showToast("Gagal memperbarui nama.", "error");
     }
   });
 }
 
 function renderSettingsPage() {
-  if (!state.user || !state.profile) return;
-  const p = state.profile;
-  $("settings-avatar").src = state.user.photoURL || "";
+  const p = state.profile || EMPTY_PROFILE;
+  $("settings-avatar").src = (state.user && state.user.photoURL) || "";
   $("settings-name-input").value = p.displayName || "";
-  $("settings-email").textContent = state.user.email || "";
+  $("settings-email").textContent = (state.user && state.user.email) || "";
 
   $("stat-games-played").textContent = p.gamesPlayed || 0;
   $("stat-wins").textContent = p.wins || 0;
@@ -859,7 +1061,6 @@ function renderSettingsPage() {
   $("stat-highest-score").textContent = p.highestScore || 0;
   $("stat-best-accuracy").textContent = (p.bestAccuracy || 0) + "%";
   $("stat-rating").textContent = p.rating || 0;
-  $("stat-total-points").textContent = p.totalPoints || 0;
 }
 
 // =====================================================================
