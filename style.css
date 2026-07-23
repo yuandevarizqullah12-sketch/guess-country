@@ -493,6 +493,95 @@ a { color: var(--accent-teal); }
 .stat-label { display: block; font-size: 10.5px; color: var(--text-faint); margin-top: 4px; text-transform: uppercase; letter-spacing: .04em; }
 
 /* =========================================================
+   CONNECTION INDICATOR (offline / reconnecting)
+   ========================================================= */
+.connection-indicator {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 800;
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  padding: 9px 16px; font-size: 12.5px; font-weight: 600;
+  background: var(--accent-rose-soft); color: var(--accent-rose);
+  border-bottom: 1px solid rgba(239, 106, 106, .3);
+  backdrop-filter: blur(12px);
+  animation: slide-down .3s var(--ease);
+}
+.connection-indicator.is-reconnecting {
+  background: var(--accent-teal-soft); color: var(--accent-teal);
+  border-bottom-color: rgba(51, 199, 179, .3);
+}
+@keyframes slide-down { from { transform: translateY(-100%); } to { transform: translateY(0); } }
+
+/* =========================================================
+   LOGIN — EMAIL/PASSWORD VIEWS
+   ========================================================= */
+.login-view { display: none; }
+.login-view.active { display: block; }
+
+.login-divider { display: flex; align-items: center; gap: 10px; margin: 18px 0; color: var(--text-faint); font-size: 12px; }
+.login-divider::before, .login-divider::after { content: ""; flex: 1; height: 1px; background: var(--glass-border); }
+
+.login-form { display: flex; flex-direction: column; gap: 10px; margin-bottom: 14px; }
+
+.login-error { color: var(--accent-rose); font-size: 12.5px; text-align: left; }
+.login-success { color: var(--success); font-size: 12.5px; text-align: left; }
+
+.login-links-row { display: flex; justify-content: space-between; gap: 10px; margin-top: 4px; }
+.login-links-center { justify-content: center; }
+.login-link-btn { font-size: 12.5px; color: var(--accent-teal); font-weight: 500; }
+.login-link-btn:hover { text-decoration: underline; }
+.login-forgot-desc { font-size: 13px; color: var(--text-secondary); margin-bottom: 16px; line-height: 1.5; }
+
+.btn-spinner {
+  width: 15px; height: 15px; border-radius: 50%;
+  border: 2px solid rgba(0,0,0,.25); border-top-color: currentColor;
+  animation: spin .7s linear infinite;
+}
+.btn.is-loading .btn-label { opacity: .5; }
+
+/* =========================================================
+   MULTIPLAYER — MATCHMAKING FLOW
+   ========================================================= */
+.mp-back-btn { margin-top: 16px; }
+.mp-room-code-actions { display: flex; gap: 8px; justify-content: center; margin-bottom: 4px; }
+
+.mp-found-card { text-align: center; }
+.mp-found-emoji { font-size: 38px; display: block; margin-bottom: 10px; }
+.mp-found-text { font-family: var(--font-display); font-size: 19px; margin-bottom: 20px; color: var(--accent-gold); }
+.mp-found-players { display: flex; align-items: center; justify-content: center; gap: 16px; }
+.mp-found-player { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+
+.mp-countdown-wrap { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 60px 0; }
+.mp-countdown-number {
+  font-family: var(--font-display); font-size: 88px; font-weight: 700;
+  color: var(--accent-gold); animation: countdown-pulse .9s var(--ease);
+}
+.mp-countdown-label { color: var(--text-secondary); font-size: 14px; margin-top: 8px; }
+@keyframes countdown-pulse {
+  0% { transform: scale(0.5); opacity: 0; }
+  40% { transform: scale(1.15); opacity: 1; }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+/* =========================================================
+   LEADERBOARD — LOADING SKELETON
+   ========================================================= */
+.skeleton-row {
+  display: flex; align-items: center; gap: 12px;
+  border-radius: var(--radius-md); padding: 11px 14px;
+  background: var(--glass-fill); border: 1px solid var(--glass-border);
+}
+.skeleton-block {
+  border-radius: 6px; background: linear-gradient(90deg, var(--glass-fill) 25%, var(--glass-fill-strong) 50%, var(--glass-fill) 75%);
+  background-size: 200% 100%; animation: skeleton-shimmer 1.4s ease-in-out infinite;
+}
+.skeleton-avatar { width: 34px; height: 34px; border-radius: 50%; flex-shrink: 0; }
+.skeleton-lines { flex: 1; display: flex; flex-direction: column; gap: 6px; }
+.skeleton-line { height: 10px; border-radius: 5px; }
+.skeleton-line.w-60 { width: 60%; }
+.skeleton-line.w-35 { width: 35%; }
+.skeleton-score { width: 34px; height: 16px; border-radius: 5px; flex-shrink: 0; }
+@keyframes skeleton-shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+
+/* =========================================================
    RESPONSIVE — DESKTOP
    ========================================================= */
 @media (min-width: 900px) {

@@ -11,6 +11,10 @@ import {
   signInWithPopup,
   signOut,
   onAuthStateChanged,
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword,
+  sendPasswordResetEmail,
+  updateProfile as updateAuthProfile,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import {
   getFirestore,
@@ -21,6 +25,7 @@ import {
   deleteDoc,
   collection,
   query,
+  where,
   orderBy,
   limit,
   onSnapshot,
@@ -28,6 +33,7 @@ import {
   serverTimestamp,
   runTransaction,
   increment,
+  enableIndexedDbPersistence,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 // ---------------------------------------------------------------------
@@ -67,6 +73,46 @@ const googleProvider = new GoogleAuthProvider();
 
 log("bootstrap", "Firebase initialized", { projectId: firebaseConfig.projectId });
 
+// Offline persistence: onSnapshot listener (profile, room) tetap punya data
+// terakhir walau koneksi terputus. Dibungkus try/catch karena bisa gagal jika
+// dibuka di banyak tab sekaligus (failed-precondition) atau browser tak mendukung.
+try {
+  enableIndexedDbPersistence(db);
+  log("bootstrap", "Firestore offline persistence enabled");
+} catch (err) {
+  logError("bootstrap", "Firestore offline persistence unavailable", err.code || err);
+}
+
+// ---------------------------------------------------------------------
+// FRIENDLY ERROR MESSAGES
+// ---------------------------------------------------------------------
+export function getFriendlyErrorMessage(err) {
+  const code = err && err.code ? err.code : "";
+
+  const authMessages = {
+    "auth/email-already-in-use": "Email ini sudah terdaftar. Coba masuk, atau gunakan email lain.",
+    "auth/invalid-email": "Format email tidak valid.",
+    "auth/weak-password": "Password terlalu lemah, minimal 6 karakter.",
+    "auth/wrong-password": "Password salah.",
+    "auth/user-not-found": "Akun dengan email ini tidak ditemukan.",
+    "auth/invalid-credential": "Email atau password salah.",
+    "auth/too-many-requests": "Terlalu banyak percobaan. Coba lagi beberapa saat lagi.",
+    "auth/popup-closed-by-user": "Login dibatalkan.",
+    "auth/network-request-failed": "Tidak ada koneksi internet.",
+  };
+  if (authMessages[code]) return authMessages[code];
+
+  if (code === "permission-denied") return "Akses ditolak. Periksa Firestore Security Rules.";
+  if (code === "failed-precondition" || code === "unimplemented") {
+    return "Composite index Firestore belum dibuat. Lihat FIRESTORE_INDEXES.md.";
+  }
+  if (code === "unavailable" || code === "network-request-failed") {
+    return "Tidak ada koneksi internet. Menampilkan data tersimpan (cache) jika ada.";
+  }
+
+  return (err && err.message) || "Terjadi kesalahan tak terduga.";
+}
+
 // =====================================================================
 // AUTH HELPER
 // =====================================================================
@@ -80,6 +126,30 @@ export async function signInWithGoogle() {
 export async function signOutUser() {
   log("auth", "signOutUser");
   await signOut(auth);
+}
+
+// ---- Email & Password ----
+export async function signUpWithEmail(email, password, displayName) {
+  log("auth", "signUpWithEmail: creating account", email);
+  const result = await createUserWithEmailAndPassword(auth, email, password);
+  if (displayName) {
+    await updateAuthProfile(result.user, { displayName });
+  }
+  log("auth", "signUpWithEmail: success", result.user.uid);
+  return result.user;
+}
+
+export async function signInWithEmail(email, password) {
+  log("auth", "signInWithEmail: attempt", email);
+  const result = await signInWithEmailAndPassword(auth, email, password);
+  log("auth", "signInWithEmail: success", result.user.uid);
+  return result.user;
+}
+
+export async function resetPassword(email) {
+  log("auth", "resetPassword: sending email", email);
+  await sendPasswordResetEmail(auth, email);
+  log("auth", "resetPassword: email sent", email);
 }
 
 export function onAuthChange(callback) {
@@ -336,6 +406,7 @@ export async function createRoom(hostUser, settings) {
 
   const roomData = {
     code,
+    type: "private",
     name: settings.name || "Room",
     settings: {
       totalRounds: settings.totalRounds,
@@ -451,6 +522,141 @@ export async function leaveRoom(code, role) {
     status: "lobby",
     updatedAt: serverTimestamp(),
   });
+}
+
+// =====================================================================
+// MATCHMAKING HELPER — collection "queue" (global, random pairing).
+// Match itself dibuat sebagai dokumen di collection "rooms" yang sama
+// (type: "matchmaking") supaya seluruh mesin game (timer, clue, scoring,
+// advance-round) bisa dipakai ulang tanpa duplikasi kode.
+// =====================================================================
+export async function joinQueue(user) {
+  await setDoc(doc(db, "queue", user.uid), {
+    uid: user.uid,
+    displayName: user.displayName || "Player",
+    photoURL: user.photoURL || "",
+    joinedAt: serverTimestamp(),
+    status: "waiting",
+    matchId: null,
+  });
+  log("room", "joinQueue", user.uid);
+}
+
+export async function leaveQueue(uid) {
+  try {
+    await deleteDoc(doc(db, "queue", uid));
+    log("room", "leaveQueue", uid);
+  } catch (_) {
+    /* sudah terhapus, abaikan */
+  }
+}
+
+// Sengaja TIDAK memakai orderBy() — cukup where() tunggal (tidak butuh
+// composite index) dan urutan hasil memang tidak relevan karena pairing dibuat acak.
+export function listenWaitingQueue(callback) {
+  const q = query(collection(db, "queue"), where("status", "==", "waiting"));
+  return onSnapshot(
+    q,
+    (snap) => callback(snap.docs.map((d) => d.data())),
+    (err) => logError("room", "listenWaitingQueue error", err)
+  );
+}
+
+export function listenMyQueueDoc(uid, callback) {
+  return onSnapshot(
+    doc(db, "queue", uid),
+    (snap) => {
+      if (snap.exists()) callback(snap.data());
+    },
+    (err) => logError("room", "listenMyQueueDoc error", err)
+  );
+}
+
+// Bangun 20 ronde: 5 Easy → 5 Medium → 5 Hard → 5 Extreme, masing-masing
+// menyimpan difficulty & roundSeconds sendiri (dipakai di sisi UI).
+export function buildMatchmakingRounds(pickRoundFn) {
+  const DIFF_ORDER = [
+    { difficulty: "easy", roundSeconds: 40, count: 5 },
+    { difficulty: "medium", roundSeconds: 28, count: 5 },
+    { difficulty: "hard", roundSeconds: 18, count: 5 },
+    { difficulty: "extreme", roundSeconds: 10, count: 5 },
+  ];
+  const rounds = [];
+  DIFF_ORDER.forEach((group) => {
+    for (let i = 0; i < group.count; i++) {
+      const round = pickRoundFn();
+      rounds.push({ ...round, difficulty: group.difficulty, roundSeconds: group.roundSeconds });
+    }
+  });
+  return rounds;
+}
+
+// Mencoba memasangkan diri sendiri dengan kandidat acak (bukan selalu yang
+// paling awal antre) — dijamin RANDOM karena kandidat sudah diacak client-side
+// sebelum fungsi ini dipanggil, dan transaction memastikan tidak ada double-pairing.
+export async function tryPairRandomOpponent(me, opponentCandidate, buildRoundsFn) {
+  const matchRef = doc(collection(db, "rooms"));
+  await runTransaction(db, async (tx) => {
+    const meRef = doc(db, "queue", me.uid);
+    const oppRef = doc(db, "queue", opponentCandidate.uid);
+    const meSnap = await tx.get(meRef);
+    const oppSnap = await tx.get(oppRef);
+
+    if (!meSnap.exists() || !oppSnap.exists()) throw new Error("PLAYER_LEFT_QUEUE");
+    if (meSnap.data().status !== "waiting" || oppSnap.data().status !== "waiting") {
+      throw new Error("ALREADY_MATCHED");
+    }
+
+    const rounds = buildRoundsFn();
+    tx.set(matchRef, {
+      code: null,
+      type: "matchmaking",
+      name: "Matchmaking",
+      settings: { totalRounds: rounds.length },
+      host: { uid: me.uid, displayName: me.displayName || "Player", photoURL: me.photoURL || "", score: 0 },
+      guest: {
+        uid: opponentCandidate.uid,
+        displayName: opponentCandidate.displayName || "Player",
+        photoURL: opponentCandidate.photoURL || "",
+        score: 0,
+      },
+      status: "opponent_found",
+      round: 0,
+      rounds,
+      answers: {},
+      roundStartAt: null,
+      countdownStartAt: Date.now(),
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+    tx.update(meRef, { status: "matched", matchId: matchRef.id });
+    tx.update(oppRef, { status: "matched", matchId: matchRef.id });
+  });
+
+  log("room", "tryPairRandomOpponent: paired", me.uid, opponentCandidate.uid, matchRef.id);
+  return matchRef.id;
+}
+
+// Dipanggil oleh salah satu client (host) sesudah countdown 3-2-1 selesai,
+// untuk memulai ronde pertama secara resmi.
+export async function beginMatchAfterCountdown(matchId) {
+  await updateDoc(doc(db, "rooms", matchId), {
+    status: "in_progress",
+    roundStartAt: Date.now(),
+    updatedAt: serverTimestamp(),
+  });
+  log("game", "beginMatchAfterCountdown", matchId);
+}
+
+// Match hasil matchmaking selalu dihapus penuh saat salah satu keluar
+// (tidak seperti private room yang kembali ke lobby).
+export async function leaveMatch(matchId) {
+  try {
+    await deleteDoc(doc(db, "rooms", matchId));
+    log("room", "leaveMatch", matchId);
+  } catch (_) {
+    /* sudah terhapus, abaikan */
+  }
 }
 
 // =====================================================================

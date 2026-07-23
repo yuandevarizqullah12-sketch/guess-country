@@ -22,6 +22,12 @@
 <!-- ===================== TOAST CONTAINER ===================== -->
 <div id="toast-container" class="toast-container" aria-live="polite"></div>
 
+<!-- ===================== OFFLINE / RECONNECT INDICATOR ===================== -->
+<div id="connection-indicator" class="connection-indicator hidden">
+  <span id="connection-indicator-icon">🔌</span>
+  <span id="connection-indicator-text">Offline — menampilkan data tersimpan</span>
+</div>
+
 <!-- ===================== MODAL ===================== -->
 <div id="modal-overlay" class="modal-overlay hidden">
   <div id="modal-box" class="modal-box glass">
@@ -58,10 +64,66 @@
       <div class="login-globe">🌍</div>
       <h1 class="login-title">Guess Country</h1>
       <p class="login-subtitle">Tebak negara dari petunjuk. Main sendiri atau ajak teman lewat private room.</p>
-      <button id="btn-google-login" class="btn btn-primary btn-google">
-        <span class="google-icon">G</span>
-        Masuk dengan Google
-      </button>
+
+      <!-- SIGN IN VIEW -->
+      <div id="login-view-signin" class="login-view active">
+        <button id="btn-google-login" class="btn btn-primary btn-google btn-block">
+          <span class="google-icon">G</span>
+          Lanjutkan dengan Google
+        </button>
+
+        <div class="login-divider"><span>atau</span></div>
+
+        <form id="login-signin-form" class="login-form" autocomplete="on">
+          <input id="login-signin-email" class="mp-form-input" type="email" placeholder="Email" autocomplete="email" required />
+          <input id="login-signin-password" class="mp-form-input" type="password" placeholder="Password" autocomplete="current-password" required />
+          <p id="login-signin-error" class="login-error hidden"></p>
+          <button id="btn-login-signin" type="submit" class="btn btn-ghost btn-block">
+            <span class="btn-label">Masuk dengan Email</span>
+            <span class="btn-spinner hidden"></span>
+          </button>
+        </form>
+
+        <div class="login-links-row">
+          <button id="btn-open-forgot" class="login-link-btn">Lupa password?</button>
+          <button id="btn-open-signup" class="login-link-btn">Buat akun baru</button>
+        </div>
+      </div>
+
+      <!-- SIGN UP VIEW -->
+      <div id="login-view-signup" class="login-view">
+        <form id="login-signup-form" class="login-form" autocomplete="on">
+          <input id="login-signup-name" class="mp-form-input" type="text" placeholder="Nama tampilan" autocomplete="name" required />
+          <input id="login-signup-email" class="mp-form-input" type="email" placeholder="Email" autocomplete="email" required />
+          <input id="login-signup-password" class="mp-form-input" type="password" placeholder="Password (min. 6 karakter)" autocomplete="new-password" required />
+          <p id="login-signup-error" class="login-error hidden"></p>
+          <button id="btn-login-signup" type="submit" class="btn btn-primary btn-block">
+            <span class="btn-label">Buat Akun</span>
+            <span class="btn-spinner hidden"></span>
+          </button>
+        </form>
+        <div class="login-links-row login-links-center">
+          <button id="btn-back-to-signin-1" class="login-link-btn">← Kembali ke halaman masuk</button>
+        </div>
+      </div>
+
+      <!-- FORGOT PASSWORD VIEW -->
+      <div id="login-view-forgot" class="login-view">
+        <p class="login-forgot-desc">Masukkan email akunmu, kami akan mengirim link reset password.</p>
+        <form id="login-forgot-form" class="login-form" autocomplete="on">
+          <input id="login-forgot-email" class="mp-form-input" type="email" placeholder="Email" autocomplete="email" required />
+          <p id="login-forgot-error" class="login-error hidden"></p>
+          <p id="login-forgot-success" class="login-success hidden"></p>
+          <button id="btn-login-forgot" type="submit" class="btn btn-primary btn-block">
+            <span class="btn-label">Kirim Link Reset</span>
+            <span class="btn-spinner hidden"></span>
+          </button>
+        </form>
+        <div class="login-links-row login-links-center">
+          <button id="btn-back-to-signin-2" class="login-link-btn">← Kembali ke halaman masuk</button>
+        </div>
+      </div>
+
       <p class="login-footnote">Dengan masuk, statistik dan skor kamu akan tersimpan otomatis.</p>
     </div>
   </div>
@@ -193,8 +255,24 @@
 
     <div id="mp-views" class="mp-views">
 
-      <!-- INTRO: pilih Create / Join -->
-      <div id="mp-view-intro" class="mp-view active">
+      <!-- HUB: pilih Matchmaking / Room -->
+      <div id="mp-view-hub" class="mp-view active">
+        <div class="mp-choice-grid">
+          <button id="btn-mp-hub-matchmaking" class="mp-choice-card glass">
+            <span class="mp-choice-emoji">🌐</span>
+            <span class="mp-choice-title">Matchmaking</span>
+            <span class="mp-choice-desc">Dipasangkan acak dengan pemain lain secara global</span>
+          </button>
+          <button id="btn-mp-hub-room" class="mp-choice-card glass">
+            <span class="mp-choice-emoji">🔑</span>
+            <span class="mp-choice-title">Room</span>
+            <span class="mp-choice-desc">Buat atau gabung private room bersama teman</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- ROOM SUB-HUB: pilih Create / Join -->
+      <div id="mp-view-intro" class="mp-view">
         <div class="mp-choice-grid">
           <button id="btn-mp-create-room" class="mp-choice-card glass">
             <span class="mp-choice-emoji">🟢</span>
@@ -206,6 +284,45 @@
             <span class="mp-choice-title">Join Room</span>
             <span class="mp-choice-desc">Masukkan kode room dari temanmu</span>
           </button>
+        </div>
+        <button id="btn-mp-intro-back" class="btn btn-ghost btn-block mp-back-btn">← Kembali</button>
+      </div>
+
+      <!-- MATCHMAKING: SEARCHING -->
+      <div id="mp-view-matchmaking-search" class="mp-view">
+        <div class="mp-form-card glass mp-waiting-card">
+          <div class="mp-waiting-spinner"></div>
+          <p class="searching-text">Searching opponent…</p>
+          <p class="searching-timer">00:<span id="mm-search-timer">00</span></p>
+          <p class="searching-count">Players Queue: <span id="mm-queue-count">0</span></p>
+          <button id="btn-mm-cancel" class="btn btn-ghost btn-block">Cancel</button>
+        </div>
+      </div>
+
+      <!-- MATCHMAKING: OPPONENT FOUND -->
+      <div id="mp-view-matchmaking-found" class="mp-view">
+        <div class="mp-form-card glass mp-found-card">
+          <span class="mp-found-emoji">⚡</span>
+          <p class="mp-found-text">Opponent Found!</p>
+          <div class="mp-found-players">
+            <div class="mp-found-player">
+              <img id="mm-found-host-avatar" class="mp-lobby-avatar" src="" alt="" />
+              <span id="mm-found-host-name" class="mp-lobby-name">Player 1</span>
+            </div>
+            <span class="mp-vs">VS</span>
+            <div class="mp-found-player">
+              <img id="mm-found-guest-avatar" class="mp-lobby-avatar" src="" alt="" />
+              <span id="mm-found-guest-name" class="mp-lobby-name">Player 2</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- MATCHMAKING: COUNTDOWN -->
+      <div id="mp-view-matchmaking-countdown" class="mp-view">
+        <div class="mp-countdown-wrap">
+          <div id="mm-countdown-number" class="mp-countdown-number">3</div>
+          <p class="mp-countdown-label">Bersiap…</p>
         </div>
       </div>
 
@@ -268,7 +385,10 @@
         <div class="mp-form-card glass mp-waiting-card">
           <p class="mp-waiting-label">Bagikan kode ini ke temanmu</p>
           <div class="mp-room-code" id="mp-room-code-display">------</div>
-          <button id="btn-mp-copy-code" class="btn btn-ghost">📋 Copy Room Code</button>
+          <div class="mp-room-code-actions">
+            <button id="btn-mp-copy-code" class="btn btn-ghost btn-small">📋 Copy Code</button>
+            <button id="btn-mp-share-code" class="btn btn-ghost btn-small">📤 Share Code</button>
+          </div>
           <div class="mp-waiting-spinner"></div>
           <p class="mp-waiting-text">Menunggu pemain kedua bergabung…</p>
           <button id="btn-mp-cancel-room" class="btn btn-danger btn-block">Batalkan Room</button>
@@ -360,7 +480,7 @@
       <h2 class="page-title">Leaderboard</h2>
       <p class="page-subtitle">Top 100 skor tertinggi — Solo Mode saja.</p>
     </header>
-    <div id="leaderboard-list" class="leaderboard-list"></div>
+    <div id="leaderboard-list" class="leaderboard-list" aria-live="polite"></div>
   </div>
 
   <!-- ---------- SETTINGS ---------- -->

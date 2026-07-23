@@ -1,11 +1,13 @@
 // =====================================================================
 // app.js
 // Seluruh logic aplikasi Guess Country.
-// Navigasi, auth, solo, multiplayer (private room), leaderboard, settings.
+// Navigasi, auth (Google + Email), solo, multiplayer (room + matchmaking),
+// leaderboard (cached), settings, cache, offline handling.
 // =====================================================================
 
 import * as api from "./services/api.js";
 import { log, logError } from "./services/api.js";
+import { cache, staleWhileRevalidate } from "./services/cache.js";
 
 // =====================================================================
 // GLOBAL STATE
@@ -48,6 +50,8 @@ const state = {
     revealTimer: 0,
   },
 
+  // Private room ATAU matchmaking match — keduanya disimpan di collection
+  // "rooms" yang sama, dibedakan lewat roomData.type ("private" | "matchmaking").
   room: {
     role: null, // 'host' | 'guest'
     code: null,
@@ -59,7 +63,15 @@ const state = {
     advancing: false,
     resultApplied: false,
     localTickInterval: null,
-    createOptions: { totalRounds: 10, roundSeconds: 30, difficulty: "medium" },
+  },
+
+  matchmaking: {
+    searching: false,
+    searchSeconds: 0,
+    searchInterval: null,
+    queueUnsub: null,
+    myQueueUnsub: null,
+    attemptingMatch: false,
   },
 };
 
@@ -72,12 +84,20 @@ const DIFFICULTY_CONFIG = {
 
 const ROOM_DIFFICULTY_CLUE_COUNT = { easy: 5, medium: 4, hard: 3, extreme: 2 };
 const ROOM_BASE_POINTS = { easy: 100, medium: 150, hard: 200, extreme: 280 };
+const LEADERBOARD_TTL_MS = 60000; // 60 detik, sesuai spesifikasi cache leaderboard.
+const LEADERBOARD_CACHE_KEY = "leaderboard:top100";
 
 // =====================================================================
 // DOM SHORTCUTS
 // =====================================================================
 const $ = (id) => document.getElementById(id);
 const $$ = (sel) => document.querySelectorAll(sel);
+
+function setAvatarSrc(imgEl, url) {
+  if (!imgEl) return;
+  imgEl.referrerPolicy = "no-referrer"; // browser tetap men-cache foto Google secara normal
+  imgEl.src = url || "";
+}
 
 // =====================================================================
 // BOOTSTRAP
@@ -87,6 +107,7 @@ async function bootstrap() {
 
   try {
     state.countries = await api.loadCountries();
+    cache.set("countries", state.countries, null); // load sekali, simpan di memory
     log("bootstrap", "countries loaded", state.countries.length);
   } catch (err) {
     logError("error", "failed to load countries", err);
@@ -94,11 +115,14 @@ async function bootstrap() {
   }
 
   registerNavigation();
+  registerConnectionEvents();
+  registerLoginViewEvents();
   registerAuthEvents();
   registerSoloEvents();
   registerMultiplayerEvents();
   registerSettingsEvents();
   registerModalEvents();
+  restorePersistedPreferences();
 
   api.onAuthChange(handleAuthChange);
   log("bootstrap", "event listeners registered, waiting for auth state");
@@ -111,6 +135,7 @@ async function handleAuthChange(user) {
     try {
       const profile = await api.ensureProfile(user);
       state.profile = profile;
+      cache.set(`profile:${user.uid}`, profile, null);
       subscribeProfile(user.uid);
       showAuthedUI();
       renderUserBadge();
@@ -130,6 +155,8 @@ async function handleAuthChange(user) {
     log("auth", "user signed out");
     if (state.profileUnsub) state.profileUnsub();
     cleanupRoomState();
+    stopMatchmakingListeners();
+    resetLoginForms();
     hideAuthedUI();
     navigateTo("login");
   }
@@ -140,6 +167,7 @@ function subscribeProfile(uid) {
   if (state.profileUnsub) state.profileUnsub();
   state.profileUnsub = api.listenProfile(uid, (profile) => {
     state.profile = profile;
+    cache.set(`profile:${uid}`, profile, null); // cache diperbarui otomatis lewat onSnapshot
     log("render", "profile snapshot received, re-rendering dependent pages");
     if (state.currentPage === "home") renderHomePage();
     if (state.currentPage === "settings") renderSettingsPage();
@@ -208,6 +236,149 @@ function hideAuthedUI() {
 }
 
 // =====================================================================
+// CONNECTION (OFFLINE / RECONNECT) INDICATOR
+// =====================================================================
+function registerConnectionEvents() {
+  window.addEventListener("online", handleConnectionOnline);
+  window.addEventListener("offline", handleConnectionOffline);
+  if (!navigator.onLine) handleConnectionOffline();
+}
+
+function handleConnectionOffline() {
+  log("render", "connection lost — using cached data");
+  const el = $("connection-indicator");
+  el.classList.remove("hidden", "is-reconnecting");
+  $("connection-indicator-icon").textContent = "🔌";
+  $("connection-indicator-text").textContent = "Offline — menampilkan data tersimpan";
+}
+
+function handleConnectionOnline() {
+  log("render", "connection restored");
+  const el = $("connection-indicator");
+  el.classList.remove("hidden");
+  el.classList.add("is-reconnecting");
+  $("connection-indicator-icon").textContent = "🔄";
+  $("connection-indicator-text").textContent = "Menyambungkan kembali…";
+  setTimeout(() => {
+    el.classList.add("hidden");
+    if (state.currentPage === "leaderboard") {
+      cache.invalidate(LEADERBOARD_CACHE_KEY);
+      renderLeaderboardPage();
+    }
+  }, 1600);
+}
+
+// =====================================================================
+// LOGIN — Google + Email/Password (sign in, sign up, forgot password)
+// =====================================================================
+function showLoginView(viewName) {
+  $$(".login-view").forEach((v) => v.classList.remove("active"));
+  const target = $(`login-view-${viewName}`);
+  if (target) target.classList.add("active");
+}
+
+function resetLoginForms() {
+  showLoginView("signin");
+  ["login-signin-form", "login-signup-form", "login-forgot-form"].forEach((id) => $(id).reset());
+  ["login-signin-error", "login-signup-error", "login-forgot-error", "login-forgot-success"].forEach((id) =>
+    $(id).classList.add("hidden")
+  );
+}
+
+function registerLoginViewEvents() {
+  $("btn-open-forgot").addEventListener("click", () => showLoginView("forgot"));
+  $("btn-open-signup").addEventListener("click", () => showLoginView("signup"));
+  $("btn-back-to-signin-1").addEventListener("click", () => showLoginView("signin"));
+  $("btn-back-to-signin-2").addEventListener("click", () => showLoginView("signin"));
+
+  $("login-signin-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const email = $("login-signin-email").value.trim();
+    const password = $("login-signin-password").value;
+    const errorEl = $("login-signin-error");
+    errorEl.classList.add("hidden");
+
+    if (!validateEmail(email)) return showLoginFieldError(errorEl, "Format email tidak valid.");
+    if (!password) return showLoginFieldError(errorEl, "Masukkan password.");
+
+    setButtonLoading("btn-login-signin", true);
+    try {
+      await api.signInWithEmail(email, password);
+      showToast("Berhasil masuk!", "success");
+    } catch (err) {
+      logError("error", "signInWithEmail failed", err);
+      showLoginFieldError(errorEl, api.getFriendlyErrorMessage(err));
+    } finally {
+      setButtonLoading("btn-login-signin", false);
+    }
+  });
+
+  $("login-signup-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const name = $("login-signup-name").value.trim();
+    const email = $("login-signup-email").value.trim();
+    const password = $("login-signup-password").value;
+    const errorEl = $("login-signup-error");
+    errorEl.classList.add("hidden");
+
+    if (!name) return showLoginFieldError(errorEl, "Masukkan nama tampilan.");
+    if (!validateEmail(email)) return showLoginFieldError(errorEl, "Format email tidak valid.");
+    if (password.length < 6) return showLoginFieldError(errorEl, "Password minimal 6 karakter.");
+
+    setButtonLoading("btn-login-signup", true);
+    try {
+      await api.signUpWithEmail(email, password, name);
+      showToast("Akun berhasil dibuat!", "success");
+    } catch (err) {
+      logError("error", "signUpWithEmail failed", err);
+      showLoginFieldError(errorEl, api.getFriendlyErrorMessage(err));
+    } finally {
+      setButtonLoading("btn-login-signup", false);
+    }
+  });
+
+  $("login-forgot-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const email = $("login-forgot-email").value.trim();
+    const errorEl = $("login-forgot-error");
+    const successEl = $("login-forgot-success");
+    errorEl.classList.add("hidden");
+    successEl.classList.add("hidden");
+
+    if (!validateEmail(email)) return showLoginFieldError(errorEl, "Format email tidak valid.");
+
+    setButtonLoading("btn-login-forgot", true);
+    try {
+      await api.resetPassword(email);
+      successEl.textContent = "Link reset password telah dikirim. Cek email kamu.";
+      successEl.classList.remove("hidden");
+    } catch (err) {
+      logError("error", "resetPassword failed", err);
+      showLoginFieldError(errorEl, api.getFriendlyErrorMessage(err));
+    } finally {
+      setButtonLoading("btn-login-forgot", false);
+    }
+  });
+}
+
+function validateEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+function showLoginFieldError(el, message) {
+  el.textContent = message;
+  el.classList.remove("hidden");
+}
+
+function setButtonLoading(btnId, loading) {
+  const btn = $(btnId);
+  btn.disabled = loading;
+  btn.classList.toggle("is-loading", loading);
+  const spinner = btn.querySelector(".btn-spinner");
+  if (spinner) spinner.classList.toggle("hidden", !loading);
+}
+
+// =====================================================================
 // AUTH EVENTS
 // =====================================================================
 function registerAuthEvents() {
@@ -217,14 +388,14 @@ function registerAuthEvents() {
       showToast("Berhasil masuk!", "success");
     } catch (err) {
       logError("error", "google sign-in failed", err);
-      showToast("Gagal masuk dengan Google.", "error");
+      showToast(api.getFriendlyErrorMessage(err), "error");
     }
   });
 
   $("btn-logout").addEventListener("click", () => {
     openModal(`
       <h3 style="margin-bottom:12px;font-family:var(--font-display)">Keluar dari akun?</h3>
-      <p style="color:var(--text-secondary);font-size:14px;margin-bottom:20px;">Kamu bisa masuk lagi kapan saja dengan akun Google yang sama.</p>
+      <p style="color:var(--text-secondary);font-size:14px;margin-bottom:20px;">Kamu bisa masuk lagi kapan saja.</p>
       <div style="display:flex;gap:10px;">
         <button class="btn btn-ghost btn-block" id="modal-cancel-logout">Batal</button>
         <button class="btn btn-danger btn-block" id="modal-confirm-logout">Keluar</button>
@@ -246,7 +417,7 @@ function registerAuthEvents() {
 
 function renderUserBadge() {
   if (!state.user) return;
-  $("user-avatar").src = state.user.photoURL || "";
+  setAvatarSrc($("user-avatar"), state.user.photoURL);
   $("user-name").textContent = state.user.displayName || "Player";
   $("home-username").textContent = (state.user.displayName || "Player").split(" ")[0];
 }
@@ -296,6 +467,42 @@ function renderHomePage() {
 }
 
 // =====================================================================
+// SETTINGS PERSISTENCE (localStorage)
+// =====================================================================
+function restorePersistedPreferences() {
+  const savedDifficulty = api.storageGet("lastSoloDifficulty");
+  if (savedDifficulty && DIFFICULTY_CONFIG[savedDifficulty]) {
+    const card = document.querySelector(`#solo-difficulty-select .difficulty-card[data-difficulty="${savedDifficulty}"]`);
+    if (card) {
+      card.classList.add("selected");
+      state.solo.difficulty = savedDifficulty;
+      $("btn-solo-start").disabled = false;
+    }
+  }
+
+  const savedRoomOptions = api.storageGet("lastRoomOptions");
+  if (savedRoomOptions) {
+    applyOptionRowValue("mp-rounds-options", savedRoomOptions.totalRounds);
+    applyOptionRowValue("mp-duration-options", savedRoomOptions.roundSeconds);
+    applyOptionRowValue("mp-difficulty-options", savedRoomOptions.difficulty);
+  }
+  const savedRoomName = api.storageGet("lastRoomName");
+  if (savedRoomName) $("mp-room-name-input").value = savedRoomName;
+
+  log("bootstrap", "restored persisted preferences from localStorage");
+}
+
+function applyOptionRowValue(containerId, value) {
+  if (value === undefined || value === null) return;
+  const container = $(containerId);
+  const btn = container.querySelector(`.mp-option-btn[data-value="${value}"]`);
+  if (!btn) return;
+  container.querySelectorAll(".mp-option-btn").forEach((b) => b.classList.remove("selected"));
+  btn.classList.add("selected");
+  container.dataset.value = String(value);
+}
+
+// =====================================================================
 // SOLO MODE
 // =====================================================================
 function renderSoloPage() {
@@ -313,6 +520,7 @@ function registerSoloEvents() {
       card.classList.add("selected");
       state.solo.difficulty = card.dataset.difficulty;
       $("btn-solo-start").disabled = false;
+      api.storageSet("lastSoloDifficulty", state.solo.difficulty);
     });
   });
 
@@ -480,6 +688,7 @@ async function endSoloGame() {
       score: s.score,
       accuracy,
     });
+    cache.invalidate(LEADERBOARD_CACHE_KEY); // skor berubah -> cache leaderboard lama tidak valid lagi
     await api.applyGameResultToProfile(state.user.uid, {
       score: s.score,
       accuracy,
@@ -488,7 +697,7 @@ async function endSoloGame() {
     });
   } catch (err) {
     logError("error", "failed to save solo result", err);
-    showToast("Gagal menyimpan hasil ke server.", "error");
+    showToast(api.getFriendlyErrorMessage(err), "error");
   }
 }
 
@@ -517,15 +726,19 @@ function renderSuggestions(inputId, listId, onPick) {
 }
 
 // =====================================================================
-// MULTIPLAYER — PRIVATE ROOM (tanpa queue / matchmaking global)
+// MULTIPLAYER — HUB (Matchmaking / Room)
 // =====================================================================
 function renderMultiplayerPage() {
-  // Jika sedang berada dalam room aktif, tampilkan view sesuai status room.
+  // Jika sedang berada dalam room/match aktif, tampilkan view sesuai status.
   if (state.room.code && state.room.data) {
     renderRoomByStatus(state.room.data);
     return;
   }
-  showMpView("intro");
+  if (state.matchmaking.searching) {
+    showMpView("matchmaking-search");
+    return;
+  }
+  showMpView("hub");
 }
 
 function showMpView(viewName) {
@@ -535,6 +748,11 @@ function showMpView(viewName) {
 }
 
 function registerMultiplayerEvents() {
+  $("btn-mp-hub-matchmaking").addEventListener("click", startMatchmakingFlow);
+  $("btn-mp-hub-room").addEventListener("click", () => showMpView("intro"));
+  $("btn-mp-intro-back").addEventListener("click", () => showMpView("hub"));
+  $("btn-mm-cancel").addEventListener("click", cancelMatchmakingSearch);
+
   $("btn-mp-create-room").addEventListener("click", () => showMpView("create-form"));
   $("btn-mp-create-cancel").addEventListener("click", () => showMpView("intro"));
   $("btn-mp-join-room-open").addEventListener("click", () => {
@@ -551,6 +769,7 @@ function registerMultiplayerEvents() {
   $("btn-mp-create-submit").addEventListener("click", createRoomFlow);
   $("btn-mp-join-submit").addEventListener("click", joinRoomFlow);
   $("btn-mp-copy-code").addEventListener("click", copyRoomCode);
+  $("btn-mp-share-code").addEventListener("click", shareRoomCode);
   $("btn-mp-cancel-room").addEventListener("click", leaveRoomFlow);
   $("btn-mp-start-game").addEventListener("click", startRoomGameFlow);
   $("btn-mp-leave-lobby").addEventListener("click", leaveRoomFlow);
@@ -576,14 +795,28 @@ function registerOptionRow(containerId) {
       container.querySelectorAll(".mp-option-btn").forEach((b) => b.classList.remove("selected"));
       btn.classList.add("selected");
       container.dataset.value = btn.dataset.value;
+      persistRoomOptions();
     });
   });
 }
 
+function persistRoomOptions() {
+  api.storageSet("lastRoomOptions", {
+    totalRounds: $("mp-rounds-options").dataset.value,
+    roundSeconds: $("mp-duration-options").dataset.value,
+    difficulty: $("mp-difficulty-options").dataset.value,
+  });
+}
+
+// ---------------------------------------------------------------------
+// PRIVATE ROOM: Create / Join
+// ---------------------------------------------------------------------
 async function createRoomFlow() {
   if (!state.user) return;
+  const roomName = $("mp-room-name-input").value.trim() || "Room";
+  api.storageSet("lastRoomName", roomName);
   const settings = {
-    name: $("mp-room-name-input").value.trim() || "Room",
+    name: roomName,
     totalRounds: parseInt($("mp-rounds-options").dataset.value, 10),
     roundSeconds: parseInt($("mp-duration-options").dataset.value, 10),
     difficulty: $("mp-difficulty-options").dataset.value,
@@ -599,7 +832,7 @@ async function createRoomFlow() {
     showMpView("waiting");
   } catch (err) {
     logError("error", "createRoomFlow failed", err);
-    showToast("Gagal membuat room. Coba lagi.", "error");
+    showToast(api.getFriendlyErrorMessage(err), "error");
   }
 }
 
@@ -632,6 +865,103 @@ async function joinRoomFlow() {
   }
 }
 
+// ---------------------------------------------------------------------
+// MATCHMAKING: global queue, random pairing
+// ---------------------------------------------------------------------
+async function startMatchmakingFlow() {
+  if (!state.user) return;
+  log("room", "startMatchmakingFlow: joining queue");
+  showMpView("matchmaking-search");
+  state.matchmaking.searching = true;
+  state.matchmaking.searchSeconds = 0;
+  state.matchmaking.attemptingMatch = false;
+  $("mm-search-timer").textContent = "00";
+  $("mm-queue-count").textContent = "0";
+
+  state.matchmaking.searchInterval = setInterval(() => {
+    state.matchmaking.searchSeconds += 1;
+    $("mm-search-timer").textContent = String(state.matchmaking.searchSeconds).padStart(2, "0");
+  }, 1000);
+
+  try {
+    await api.joinQueue(state.user);
+  } catch (err) {
+    logError("error", "joinQueue failed", err);
+    showToast(api.getFriendlyErrorMessage(err), "error");
+    cancelMatchmakingSearch();
+    return;
+  }
+
+  state.matchmaking.queueUnsub = api.listenWaitingQueue(handleQueueSnapshot);
+  state.matchmaking.myQueueUnsub = api.listenMyQueueDoc(state.user.uid, handleMyQueueUpdate);
+}
+
+function handleQueueSnapshot(waitingDocs) {
+  $("mm-queue-count").textContent = String(waitingDocs.length);
+  if (!state.matchmaking.searching || state.matchmaking.attemptingMatch) return;
+
+  const iAmWaiting = waitingDocs.some((d) => d.uid === state.user.uid);
+  const others = waitingDocs.filter((d) => d.uid !== state.user.uid);
+  if (!iAmWaiting || others.length === 0) return;
+
+  // Pilih lawan SECARA ACAK dari antrean — bukan selalu yang paling awal.
+  const candidate = others[Math.floor(Math.random() * others.length)];
+  state.matchmaking.attemptingMatch = true;
+  log("room", "attempting random pairing with", candidate.uid);
+
+  api.tryPairRandomOpponent(state.user, candidate, buildMatchmakingRoundsForMatch).catch((err) => {
+    // Kandidat sudah dipasangkan client lain, atau keluar antrean — retry di snapshot berikutnya.
+    log("room", "pairing attempt failed, will retry", err.message);
+    state.matchmaking.attemptingMatch = false;
+  });
+}
+
+function buildMatchmakingRoundsForMatch() {
+  const used = [];
+  return api.buildMatchmakingRounds(() => {
+    const country = api.pickRandomCountry(state.countries, used);
+    used.push(country.name);
+    return { countryName: country.name, clues: api.buildClueSet(country) };
+  });
+}
+
+function handleMyQueueUpdate(data) {
+  if (data.status === "matched" && data.matchId) {
+    log("room", "matched!", data.matchId);
+    stopMatchmakingListeners();
+    api.leaveQueue(state.user.uid);
+    resetRoomState();
+    state.room.code = data.matchId;
+    subscribeRoom(data.matchId);
+  }
+}
+
+function stopMatchmakingListeners() {
+  if (state.matchmaking.searchInterval) clearInterval(state.matchmaking.searchInterval);
+  if (state.matchmaking.queueUnsub) state.matchmaking.queueUnsub();
+  if (state.matchmaking.myQueueUnsub) state.matchmaking.myQueueUnsub();
+  state.matchmaking.searchInterval = null;
+  state.matchmaking.queueUnsub = null;
+  state.matchmaking.myQueueUnsub = null;
+  state.matchmaking.searching = false;
+  state.matchmaking.attemptingMatch = false;
+}
+
+async function cancelMatchmakingSearch() {
+  stopMatchmakingListeners();
+  if (state.user) {
+    try {
+      await api.leaveQueue(state.user.uid);
+    } catch (_) {
+      /* abaikan */
+    }
+  }
+  showMpView("hub");
+}
+
+// ---------------------------------------------------------------------
+// SHARED ROOM/MATCH ENGINE (dipakai Private Room DAN Matchmaking)
+// ---------------------------------------------------------------------
 function subscribeRoom(code) {
   if (state.room.unsub) state.room.unsub();
   state.room.unsub = api.listenRoom(code, handleRoomSnapshot);
@@ -641,8 +971,9 @@ function handleRoomSnapshot(roomData) {
   if (!roomData) {
     if (state.room.code) {
       showToast("Room telah ditutup.", "error");
+      const wasMatchmaking = state.room.data && state.room.data.type === "matchmaking";
       cleanupRoomState();
-      if (state.currentPage === "multiplayer") showMpView("intro");
+      if (state.currentPage === "multiplayer") showMpView(wasMatchmaking ? "hub" : "intro");
     }
     return;
   }
@@ -650,6 +981,16 @@ function handleRoomSnapshot(roomData) {
   if (state.currentPage === "multiplayer") {
     renderRoomByStatus(roomData);
   }
+}
+
+function getRoundSeconds(roomData) {
+  if (roomData.type === "matchmaking") return roomData.rounds[roomData.round].roundSeconds;
+  return roomData.settings.roundSeconds;
+}
+
+function getRoundDifficulty(roomData) {
+  if (roomData.type === "matchmaking") return roomData.rounds[roomData.round].difficulty;
+  return roomData.settings.difficulty;
 }
 
 function renderRoomByStatus(roomData) {
@@ -664,6 +1005,22 @@ function renderRoomByStatus(roomData) {
     }
     renderLobby(roomData, isHost);
     showMpView("lobby");
+    return;
+  }
+
+  if (roomData.status === "opponent_found") {
+    if (state.room.lastStatus !== "opponent_found") {
+      state.room.lastStatus = "opponent_found";
+      renderMatchFound(roomData);
+      showMpView("matchmaking-found");
+      const matchId = roomData.id;
+      setTimeout(() => {
+        if (state.room.code === matchId && state.room.data && state.room.data.status === "opponent_found") {
+          showMpView("matchmaking-countdown");
+          startMatchCountdown(roomData, isHost);
+        }
+      }, 1400);
+    }
     return;
   }
 
@@ -683,16 +1040,43 @@ function renderRoomByStatus(roomData) {
   }
 }
 
+function renderMatchFound(roomData) {
+  setAvatarSrc($("mm-found-host-avatar"), roomData.host.photoURL);
+  $("mm-found-host-name").textContent = roomData.host.displayName;
+  setAvatarSrc($("mm-found-guest-avatar"), roomData.guest ? roomData.guest.photoURL : "");
+  $("mm-found-guest-name").textContent = roomData.guest ? roomData.guest.displayName : "Player 2";
+}
+
+function startMatchCountdown(roomData, isHost) {
+  if (state.room.localTickInterval) clearInterval(state.room.localTickInterval);
+
+  const tick = () => {
+    const elapsed = (Date.now() - roomData.countdownStartAt) / 1000;
+    const remaining = Math.max(3 - Math.floor(elapsed), 0);
+    $("mm-countdown-number").textContent = remaining > 0 ? String(remaining) : "GO!";
+
+    if (elapsed >= 3) {
+      clearInterval(state.room.localTickInterval);
+      if (isHost) {
+        api.beginMatchAfterCountdown(roomData.id).catch((err) => logError("error", "beginMatchAfterCountdown failed", err));
+      }
+    }
+  };
+
+  tick();
+  state.room.localTickInterval = setInterval(tick, 200);
+}
+
 function renderLobby(roomData, isHost) {
   $("mp-lobby-room-name").textContent = roomData.name;
-  $("mp-lobby-host-avatar").src = roomData.host.photoURL || "";
+  setAvatarSrc($("mp-lobby-host-avatar"), roomData.host.photoURL);
   $("mp-lobby-host-name").textContent = roomData.host.displayName;
 
   if (roomData.guest) {
-    $("mp-lobby-guest-avatar").src = roomData.guest.photoURL || "";
+    setAvatarSrc($("mp-lobby-guest-avatar"), roomData.guest.photoURL);
     $("mp-lobby-guest-name").textContent = roomData.guest.displayName;
   } else {
-    $("mp-lobby-guest-avatar").src = "";
+    setAvatarSrc($("mp-lobby-guest-avatar"), "");
     $("mp-lobby-guest-name").textContent = "Menunggu…";
   }
 
@@ -721,7 +1105,7 @@ async function startRoomGameFlow() {
     await api.startRoomGame(roomData.code, rounds);
   } catch (err) {
     logError("error", "startRoomGameFlow failed", err);
-    showToast("Gagal memulai permainan.", "error");
+    showToast(api.getFriendlyErrorMessage(err), "error");
   }
 }
 
@@ -737,10 +1121,10 @@ function buildRoomRounds(totalRounds) {
 }
 
 function renderRoomScoreboard(roomData) {
-  $("mp-host-avatar").src = roomData.host.photoURL || "";
+  setAvatarSrc($("mp-host-avatar"), roomData.host.photoURL);
   $("mp-host-name").textContent = roomData.host.displayName;
   $("mp-host-score").textContent = roomData.host.score || 0;
-  $("mp-guest-avatar").src = roomData.guest ? roomData.guest.photoURL || "" : "";
+  setAvatarSrc($("mp-guest-avatar"), roomData.guest ? roomData.guest.photoURL : "");
   $("mp-guest-name").textContent = roomData.guest ? roomData.guest.displayName : "Guest";
   $("mp-guest-score").textContent = roomData.guest ? roomData.guest.score || 0 : 0;
 }
@@ -757,7 +1141,8 @@ function handleRoomRoundUpdate(roomData, isHost) {
     $("mp-round").textContent = `${roomData.round + 1}/${roomData.rounds.length}`;
 
     const roundInfo = roomData.rounds[roomData.round];
-    const clueCount = ROOM_DIFFICULTY_CLUE_COUNT[roomData.settings.difficulty] || 4;
+    const difficulty = getRoundDifficulty(roomData);
+    const clueCount = ROOM_DIFFICULTY_CLUE_COUNT[difficulty] || 4;
     $("mp-clue-text").innerHTML = roundInfo.clues.slice(0, clueCount).join("<br><br>");
 
     startRoomLocalTimer(roomData);
@@ -768,15 +1153,16 @@ function handleRoomRoundUpdate(roomData, isHost) {
 
 function startRoomLocalTimer(roomData) {
   if (state.room.localTickInterval) clearInterval(state.room.localTickInterval);
+  const roundSeconds = getRoundSeconds(roomData);
 
   const tick = () => {
     const elapsed = (Date.now() - roomData.roundStartAt) / 1000;
-    const remaining = Math.max(roomData.settings.roundSeconds - elapsed, 0);
+    const remaining = Math.max(roundSeconds - elapsed, 0);
     $("mp-timer").textContent = String(Math.ceil(remaining)).padStart(2, "0");
-    const pct = Math.max((remaining / roomData.settings.roundSeconds) * 100, 0);
+    const pct = Math.max((remaining / roundSeconds) * 100, 0);
     const bar = $("mp-timer-bar");
     bar.style.width = pct + "%";
-    bar.classList.toggle("warning", remaining <= roomData.settings.roundSeconds * 0.3);
+    bar.classList.toggle("warning", remaining <= roundSeconds * 0.3);
 
     if (remaining <= 0) {
       clearInterval(state.room.localTickInterval);
@@ -796,7 +1182,7 @@ function startRoomLocalTimer(roomData) {
 function updateRoomRoundStatus(roomData) {
   const answers = roomData.answers || {};
   const isHost = roomData.host.uid === state.user.uid;
-  const oppUid = isHost ? (roomData.guest && roomData.guest.uid) : roomData.host.uid;
+  const oppUid = isHost ? roomData.guest && roomData.guest.uid : roomData.host.uid;
 
   if (oppUid && answers[oppUid] && !state.room.answered) {
     $("mp-round-status").textContent = "Lawan sudah menjawab — cepat!";
@@ -825,7 +1211,7 @@ async function submitRoomAnswerFlow() {
   const timeMs = Date.now() - roomData.roundStartAt;
 
   try {
-    await api.submitRoomAnswer(roomData.code, state.user.uid, { correct, timeMs, value });
+    await api.submitRoomAnswer(roomData.code || roomData.id, state.user.uid, { correct, timeMs, value });
     showToast(correct ? "Jawaban terkirim — benar!" : "Jawaban terkirim.", correct ? "success" : "info");
   } catch (err) {
     logError("error", "submitRoomAnswerFlow failed", err);
@@ -842,8 +1228,9 @@ async function maybeAdvanceRoomRound(roomData) {
     const guest = roomData.guest;
     const aHost = answers[host.uid];
     const aGuest = guest ? answers[guest.uid] : null;
-    const basePoints = ROOM_BASE_POINTS[roomData.settings.difficulty] || 150;
-    const roundMs = roomData.settings.roundSeconds * 1000;
+    const difficulty = getRoundDifficulty(roomData);
+    const basePoints = ROOM_BASE_POINTS[difficulty] || 150;
+    const roundMs = getRoundSeconds(roomData) * 1000;
 
     let hostGain = 0;
     let guestGain = 0;
@@ -866,8 +1253,8 @@ async function maybeAdvanceRoomRound(roomData) {
       status: isLastRound ? "finished" : "in_progress",
     };
 
-    await api.advanceRoomRound(roomData.code, patch);
-    log("game", "round advanced", roomData.code, patch);
+    await api.advanceRoomRound(roomData.code || roomData.id, patch);
+    log("game", "round advanced", roomData.code || roomData.id, patch);
   } catch (err) {
     logError("error", "maybeAdvanceRoomRound failed", err);
   } finally {
@@ -878,6 +1265,7 @@ async function maybeAdvanceRoomRound(roomData) {
 async function renderRoomResult(roomData, isHost) {
   const hostScore = roomData.host.score || 0;
   const guestScore = roomData.guest ? roomData.guest.score || 0 : 0;
+  const isMatchmaking = roomData.type === "matchmaking";
 
   $("mp-result-host-score").textContent = hostScore;
   $("mp-result-guest-score").textContent = guestScore;
@@ -893,7 +1281,8 @@ async function renderRoomResult(roomData, isHost) {
   }
   $("mp-result-title").textContent = title;
   $("mp-result-emoji").textContent = emoji;
-  $("btn-mp-rematch").classList.toggle("hidden", !isHost);
+  $("btn-mp-rematch").classList.toggle("hidden", !isHost || isMatchmaking);
+  $("btn-mp-leave-result").textContent = isMatchmaking ? "Kembali ke Multiplayer" : "Leave Room";
 
   if (state.room.lastStatus !== "finished") {
     state.room.lastStatus = "finished";
@@ -918,14 +1307,14 @@ async function renderRoomResult(roomData, isHost) {
 
 async function rematchRoomFlow() {
   const roomData = state.room.data;
-  if (!roomData || state.room.role !== "host") return;
+  if (!roomData || state.room.role !== "host" || roomData.type === "matchmaking") return;
   const rounds = buildRoomRounds(roomData.settings.totalRounds);
   try {
     await api.startRoomGame(roomData.code, rounds);
     showToast("Rematch dimulai!", "success");
   } catch (err) {
     logError("error", "rematchRoomFlow failed", err);
-    showToast("Gagal memulai rematch.", "error");
+    showToast(api.getFriendlyErrorMessage(err), "error");
   }
 }
 
@@ -940,20 +1329,47 @@ async function copyRoomCode() {
   }
 }
 
-async function leaveRoomFlow() {
-  const code = state.room.code;
-  const role = state.room.role;
-  if (!code) {
-    showMpView("intro");
+async function shareRoomCode() {
+  if (!state.room.code) return;
+  const shareText = `Yuk main Guess Country bareng! Masukkan kode room ini: ${state.room.code}`;
+  if (navigator.share) {
+    try {
+      await navigator.share({ title: "Guess Country", text: shareText });
+    } catch (_) {
+      /* dibatalkan pengguna, abaikan */
+    }
     return;
   }
   try {
-    await api.leaveRoom(code, role);
+    await navigator.clipboard.writeText(shareText);
+    showToast("Teks ajakan disalin, kirim ke temanmu!", "success");
+  } catch (err) {
+    logError("error", "shareRoomCode fallback failed", err);
+    showToast("Gagal membagikan kode.", "error");
+  }
+}
+
+async function leaveRoomFlow() {
+  const roomData = state.room.data;
+  const code = state.room.code;
+  const isMatchmaking = roomData && roomData.type === "matchmaking";
+
+  if (!code) {
+    showMpView("hub");
+    return;
+  }
+
+  try {
+    if (isMatchmaking) {
+      await api.leaveMatch(code);
+    } else {
+      await api.leaveRoom(code, state.room.role);
+    }
   } catch (err) {
     logError("error", "leaveRoomFlow failed", err);
   }
   cleanupRoomState();
-  showMpView("intro");
+  showMpView(isMatchmaking ? "hub" : "intro");
 }
 
 function resetRoomState() {
@@ -970,7 +1386,6 @@ function resetRoomState() {
     advancing: false,
     resultApplied: false,
     localTickInterval: null,
-    createOptions: { totalRounds: 10, roundSeconds: 30, difficulty: "medium" },
   };
 }
 
@@ -984,45 +1399,74 @@ function capitalize(str) {
 }
 
 // =====================================================================
-// LEADERBOARD — loading / empty / error state selalu ditangani eksplisit.
+// LEADERBOARD — cache TTL 60 detik + Stale-While-Revalidate + skeleton.
 // =====================================================================
+function leaderboardSkeletonHtml(rows = 6) {
+  return Array.from({ length: rows })
+    .map(
+      () => `
+        <div class="skeleton-row">
+          <div class="skeleton-block skeleton-avatar"></div>
+          <div class="skeleton-lines">
+            <div class="skeleton-block skeleton-line w-60"></div>
+            <div class="skeleton-block skeleton-line w-35"></div>
+          </div>
+          <div class="skeleton-block skeleton-score"></div>
+        </div>`
+    )
+    .join("");
+}
+
+function leaderboardEntriesHtml(entries) {
+  return entries
+    .map((entry, index) => {
+      const isMe = state.user && entry.uid === state.user.uid;
+      return `
+        <div class="leaderboard-row ${isMe ? "is-me" : ""}">
+          <span class="leaderboard-rank">${index + 1}</span>
+          <img class="leaderboard-avatar" referrerpolicy="no-referrer" src="${entry.photoURL || ""}" alt="" />
+          <div class="leaderboard-info">
+            <div class="leaderboard-name">${escapeHtml(entry.displayName || "Player")}</div>
+            <div class="leaderboard-sub">Akurasi ${entry.accuracy || 0}% · ${entry.gamesPlayed || 0} game</div>
+          </div>
+          <span class="leaderboard-score">${entry.highestScore || 0}</span>
+        </div>
+      `;
+    })
+    .join("");
+}
+
 async function renderLeaderboardPage() {
   const container = $("leaderboard-list");
-  container.innerHTML = `<p class="leaderboard-state">Memuat leaderboard…</p>`;
+  if (!cache.getEntry(LEADERBOARD_CACHE_KEY)) {
+    container.innerHTML = leaderboardSkeletonHtml();
+  }
   log("leaderboard", "rendering leaderboard page");
 
-  try {
-    const entries = await api.fetchTopLeaderboard(100);
-
-    if (state.currentPage !== "leaderboard") return; // pengguna sudah pindah halaman
-
+  const renderEntries = (entries, meta) => {
+    if (state.currentPage !== "leaderboard") return;
     if (!entries.length) {
       container.innerHTML = `<p class="leaderboard-state">Belum ada data. Jadilah yang pertama bermain Solo Mode!</p>`;
       log("leaderboard", "empty state");
       return;
     }
+    container.innerHTML = leaderboardEntriesHtml(entries);
+    log("leaderboard", meta.stale ? "rendered from cache" : "rendered fresh from Firestore", entries.length, "entries");
+  };
 
-    container.innerHTML = entries
-      .map((entry, index) => {
-        const isMe = state.user && entry.uid === state.user.uid;
-        return `
-          <div class="leaderboard-row ${isMe ? "is-me" : ""}">
-            <span class="leaderboard-rank">${index + 1}</span>
-            <img class="leaderboard-avatar" src="${entry.photoURL || ""}" alt="" />
-            <div class="leaderboard-info">
-              <div class="leaderboard-name">${escapeHtml(entry.displayName || "Player")}</div>
-              <div class="leaderboard-sub">Akurasi ${entry.accuracy || 0}% · ${entry.gamesPlayed || 0} game</div>
-            </div>
-            <span class="leaderboard-score">${entry.highestScore || 0}</span>
-          </div>
-        `;
-      })
-      .join("");
-    log("leaderboard", "rendered", entries.length, "entries");
+  try {
+    // TIDAK fetch ke Firestore jika cache (TTL 60 detik) masih valid.
+    await staleWhileRevalidate(LEADERBOARD_CACHE_KEY, LEADERBOARD_TTL_MS, () => api.fetchTopLeaderboard(100), renderEntries, true);
   } catch (err) {
     logError("error", "renderLeaderboardPage failed", err);
     if (state.currentPage !== "leaderboard") return;
-    container.innerHTML = `<p class="leaderboard-state is-error">Gagal memuat leaderboard. Periksa koneksi atau Firestore rules/index kamu.</p>`;
+    const cached = cache.get(LEADERBOARD_CACHE_KEY);
+    if (cached && cached.length) {
+      renderEntries(cached, { stale: true });
+      showToast("Gagal memuat data terbaru, menampilkan cache.", "error");
+    } else {
+      container.innerHTML = `<p class="leaderboard-state is-error">${escapeHtml(api.getFriendlyErrorMessage(err))}</p>`;
+    }
   }
 }
 
@@ -1044,14 +1488,14 @@ function registerSettingsEvents() {
       showToast("Nama berhasil diperbarui.", "success");
     } catch (err) {
       logError("error", "updateProfileName failed", err);
-      showToast("Gagal memperbarui nama.", "error");
+      showToast(api.getFriendlyErrorMessage(err), "error");
     }
   });
 }
 
 function renderSettingsPage() {
   const p = state.profile || EMPTY_PROFILE;
-  $("settings-avatar").src = (state.user && state.user.photoURL) || "";
+  setAvatarSrc($("settings-avatar"), state.user && state.user.photoURL);
   $("settings-name-input").value = p.displayName || "";
   $("settings-email").textContent = (state.user && state.user.email) || "";
 
