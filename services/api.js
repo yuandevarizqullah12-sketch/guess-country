@@ -30,6 +30,7 @@ import {
   limit,
   onSnapshot,
   getDocs,
+  getDocsFromServer,
   serverTimestamp,
   runTransaction,
   increment,
@@ -297,7 +298,7 @@ export async function fetchTopLeaderboard(topN = 100) {
     orderBy("accuracy", "desc"),
     limit(topN)
   );
-  const snap = await getDocs(q);
+  const snap = await getDocsFromServer(q);
   const entries = snap.docs.map((d) => d.data());
   log("leaderboard", "fetchTopLeaderboard: got", entries.length, "entries");
   return entries;
